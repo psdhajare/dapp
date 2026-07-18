@@ -1,0 +1,19 @@
+[Unit]
+Description=Best Card ingestion service (card name -> reward rules JSON)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust to where you cloned the repo inside the container.
+WorkingDirectory=/opt/dapp
+# DEEPSEEK_API_KEY (and optional INGEST_HOST/INGEST_PORT/INGEST_DB) live here.
+EnvironmentFile=/opt/dapp/.env
+ExecStart=/usr/bin/python3 -m ingestion.server
+Restart=always
+RestartSec=3
+User=dapp
+Group=dapp
+
+[Install]
+WantedBy=multi-user.target

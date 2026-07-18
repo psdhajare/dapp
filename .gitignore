@@ -1,0 +1,36 @@
+# --- Secrets ---
+.env
+*.env
+!.env.example
+
+# --- Generated DB (built from schema.sql + seed.sql) ---
+db/cards.db
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Deploy artifacts ---
+dapp-ingest.tar.gz
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# --- Dart / Flutter ---
+app/.dart_tool/
+app/build/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+engine/.dart_tool/
+engine/pubspec.lock
+.packages
+
+# --- Tooling / editor ---
+.playwright-mcp/
+.wrangler/
+.DS_Store
+*.log
