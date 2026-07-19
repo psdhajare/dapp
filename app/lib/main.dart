@@ -1294,6 +1294,15 @@ class _CardInfoSheet extends StatelessWidget {
         _ => 'Card',
       };
 
+  /// APR risk bands: <15 purple, 15–20 green, 20–25 orange, >25 red.
+  Color? _aprColor(double? apr) {
+    if (apr == null) return null;
+    if (apr < 15) return const Color(0xFF7E57C2); // purple
+    if (apr < 20) return const Color(0xFF2E9E5B); // green
+    if (apr < 25) return const Color(0xFFE08A2E); // orange
+    return const Color(0xFFD64545); // red
+  }
+
   String _rateLabel(RuleInfo r) => r.unit == 'points_per_unit'
       ? '${r.rate.toStringAsFixed(r.rate == r.rate.roundToDouble() ? 0 : 2)} pts / ${details.currency}'
       : '${r.rate.toStringAsFixed(r.rate == r.rate.roundToDouble() ? 0 : 2)}%';
@@ -1324,45 +1333,60 @@ class _CardInfoSheet extends StatelessWidget {
     ];
     return SafeArea(
       top: false,
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-            20, 14, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
-        child: ListView(
-          shrinkWrap: true,
+      child: ConstrainedBox(
+        // Cap height so the sheet never reaches the status bar — otherwise a
+        // swipe-down opens iOS Notification Center instead of closing it.
+        constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                    color: scheme.outline,
-                    borderRadius: BorderRadius.circular(2)),
-              ),
+            const SizedBox(height: 14),
+            Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                  color: scheme.outline,
+                  borderRadius: BorderRadius.circular(2)),
             ),
-            const SizedBox(height: 16),
-            Text(displayIssuer(card.issuer).toUpperCase(),
-                style: t.textTheme.labelSmall),
-            const SizedBox(height: 2),
-            Text(card.name, style: t.textTheme.displaySmall),
-            const SizedBox(height: 20),
-            Text('KEY FACTS', style: t.textTheme.labelSmall),
-            const SizedBox(height: 8),
-            for (final (label, value) in facts)
-              _FactRow(label: label, value: value, emphasize: label.startsWith('APR')),
-            const SizedBox(height: 20),
-            Text('REWARDS', style: t.textTheme.labelSmall),
-            const SizedBox(height: 8),
-            if (details.rules.isEmpty)
-              Text('No reward rules on record for this card.',
-                  style: t.textTheme.bodyMedium
-                      ?.copyWith(color: scheme.onSurfaceVariant))
-            else
-              for (final r in details.rules) _RuleRow(rate: _rateLabel(r), rule: r),
-            const SizedBox(height: 16),
-            Text(
-              'APR and full terms are in your card agreement.',
-              style: t.textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant.withValues(alpha: 0.8)),
+            // Everything below scrolls WITHIN the sheet.
+            Flexible(
+              child: ListView(
+                padding: EdgeInsets.fromLTRB(
+                    20, 16, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+                children: [
+                  Text(displayIssuer(card.issuer).toUpperCase(),
+                      style: t.textTheme.labelSmall),
+                  const SizedBox(height: 2),
+                  Text(card.name, style: t.textTheme.displaySmall),
+                  const SizedBox(height: 20),
+                  Text('KEY FACTS', style: t.textTheme.labelSmall),
+                  const SizedBox(height: 8),
+                  for (final (label, value) in facts)
+                    _FactRow(
+                        label: label,
+                        value: value,
+                        valueColor: label.startsWith('APR')
+                            ? _aprColor(details.apr)
+                            : null),
+                  const SizedBox(height: 20),
+                  Text('REWARDS', style: t.textTheme.labelSmall),
+                  const SizedBox(height: 8),
+                  if (details.rules.isEmpty)
+                    Text('No reward rules on record for this card.',
+                        style: t.textTheme.bodyMedium
+                            ?.copyWith(color: scheme.onSurfaceVariant))
+                  else
+                    for (final r in details.rules)
+                      _RuleRow(rate: _rateLabel(r), rule: r),
+                  const SizedBox(height: 16),
+                  Text(
+                    'APR and full terms are in your card agreement.',
+                    style: t.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant.withValues(alpha: 0.8)),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -1374,9 +1398,9 @@ class _CardInfoSheet extends StatelessWidget {
 class _FactRow extends StatelessWidget {
   final String label;
   final String value;
-  final bool emphasize;
+  final Color? valueColor; // band colour for APR; null = default ink
   const _FactRow(
-      {required this.label, required this.value, this.emphasize = false});
+      {required this.label, required this.value, this.valueColor});
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
@@ -1390,10 +1414,9 @@ class _FactRow extends StatelessWidget {
               style: t.textTheme.bodyMedium
                   ?.copyWith(color: scheme.onSurfaceVariant)),
           Text(value,
-              style: (emphasize ? t.textTheme.titleMedium : t.textTheme.titleSmall)
-                  ?.copyWith(
-                      color: emphasize ? scheme.primary : scheme.onSurface,
-                      fontWeight: FontWeight.w600)),
+              style: t.textTheme.titleSmall?.copyWith(
+                  color: valueColor ?? scheme.onSurface,
+                  fontWeight: FontWeight.w700)), // just bold
         ],
       ),
     );
