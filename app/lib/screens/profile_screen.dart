@@ -2,11 +2,13 @@
 // v1.1 Profile screen (Design System §6). Pushed page, no bottom nav.
 import 'package:flutter/material.dart';
 
+import '../analytics.dart';
 import '../profile_store.dart';
 import '../theme/concierge_theme.dart';
 
 class ProfileScreen extends StatefulWidget {
   final ProfileStore profile;
+  final Analytics analytics;
   final Future<void> Function() onRefreshCardData;
   final Future<void> Function() onRemoveAllCards;
   final String? lastUpdatedLabel;
@@ -14,6 +16,7 @@ class ProfileScreen extends StatefulWidget {
   const ProfileScreen({
     super.key,
     required this.profile,
+    required this.analytics,
     required this.onRefreshCardData,
     required this.onRemoveAllCards,
     this.lastUpdatedLabel,
@@ -128,6 +131,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 title: 'Clear search history',
                 titleColor: scheme.primary,
                 onTap: widget.profile.clearSearchHistory,
+              ),
+            ],
+          ),
+
+          // PRIVACY
+          const _Eyebrow('PRIVACY'),
+          _SurfaceCard(
+            children: [
+              AnimatedBuilder(
+                animation: widget.analytics,
+                builder: (context, _) => _SwitchRow(
+                  switchKey: const Key('analytics_toggle'),
+                  title: 'Share anonymous usage',
+                  description:
+                      'Anonymous counts only — no names, cards, or amounts. '
+                      'Helps improve the app.',
+                  value: widget.analytics.enabled,
+                  onChanged: widget.analytics.setEnabled,
+                ),
               ),
             ],
           ),
@@ -379,11 +401,13 @@ class _SwitchRow extends StatelessWidget {
   final String description;
   final bool value;
   final ValueChanged<bool> onChanged;
+  final Key switchKey;
   const _SwitchRow({
     required this.title,
     required this.description,
     required this.value,
     required this.onChanged,
+    this.switchKey = const Key('search_history_toggle'),
   });
 
   @override
@@ -408,7 +432,7 @@ class _SwitchRow extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           Switch(
-            key: const Key('search_history_toggle'),
+            key: switchKey,
             value: value,
             onChanged: onChanged,
           ),

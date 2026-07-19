@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:engine/engine.dart';
 import 'package:sqflite_common/sqlite_api.dart';
 
+import 'util/offer_dedupe.dart';
+
 class CardInfo {
   final String id;
   final String name;
@@ -224,7 +226,7 @@ class CardDao {
       WHERE o.category = ?
       ORDER BY o.title
     ''', [category]);
-    return [
+    final offers = [
       for (final r in rows)
         OfferInfo(
           cardLabel: '${r['issuer']} · ${r['name']}',
@@ -235,6 +237,7 @@ class CardDao {
           description: r['description'] as String?,
         ),
     ];
+    return dedupeByText(offers, (o) => '${o.title} ${o.description ?? ''}');
   }
 
   // --- merchant search cache (cache-aside) ---

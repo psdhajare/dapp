@@ -1,3 +1,4 @@
+import 'package:bestcard/analytics.dart';
 import 'package:bestcard/dao.dart';
 import 'package:bestcard/ingest_service.dart';
 import 'package:bestcard/main.dart';
@@ -62,6 +63,7 @@ Future<BestCardApp> buildApp({
     locationFn: () async => (51.5, -0.12),
     ingest: ingest,
     profile: await ProfileStore.load(),
+    analytics: await Analytics.load(),
   );
 }
 
@@ -159,6 +161,12 @@ void main() {
 
     await tester.enterText(
         find.byKey(const Key('new_card_field')), 'Emirates NBD Titanium');
+    // Step 1: fetch -> card preview + colour picker appear in the sheet.
+    await tester.tap(find.byKey(const Key('confirm_add_card')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('swatch_Graphite')), findsOneWidget);
+
+    // Step 2: confirm -> card saved to the wallet.
     await tester.tap(find.byKey(const Key('confirm_add_card')));
     await tester.pumpAndSettle();
 

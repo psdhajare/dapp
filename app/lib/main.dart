@@ -4,18 +4,22 @@ import 'package:engine/engine.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 
+import 'analytics.dart';
 import 'app_db.dart';
 import 'dao.dart';
 import 'db_factory.dart';
+import 'home_widget_service.dart';
 import 'ingest_service.dart';
 import 'input_guard.dart';
 import 'merchant_category.dart';
 import 'profile_store.dart';
 import 'rate_limiter.dart';
 import 'screens/profile_screen.dart';
+import 'share_service.dart';
 import 'theme/concierge_theme.dart';
 import 'util/formatting.dart';
 import 'util/gradients.dart';
+import 'util/offer_dedupe.dart';
 import 'venue.dart';
 import 'widgets/card_visual.dart';
 
@@ -56,6 +60,7 @@ Future<void> main() async {
     )),
   );
   final profile = await ProfileStore.load();
+  final analytics = await Analytics.load();
 
   runApp(BestCardApp(
     dao: dao,
@@ -63,6 +68,7 @@ Future<void> main() async {
     locationFn: _deviceLocation,
     ingest: ingest,
     profile: profile,
+    analytics: analytics,
   ));
 }
 
@@ -72,6 +78,7 @@ class BestCardApp extends StatelessWidget {
   final LocationFn locationFn;
   final IngestService? ingest;
   final ProfileStore profile;
+  final Analytics analytics;
 
   const BestCardApp({
     super.key,
@@ -79,6 +86,7 @@ class BestCardApp extends StatelessWidget {
     required this.venue,
     required this.locationFn,
     required this.profile,
+    required this.analytics,
     this.ingest,
   });
 
@@ -98,7 +106,8 @@ class BestCardApp extends StatelessWidget {
             venue: venue,
             locationFn: locationFn,
             ingest: ingest,
-            profile: profile),
+            profile: profile,
+            analytics: analytics),
       ),
     );
   }
@@ -110,6 +119,7 @@ class RootScreen extends StatefulWidget {
   final LocationFn locationFn;
   final IngestService? ingest;
   final ProfileStore profile;
+  final Analytics analytics;
 
   const RootScreen({
     super.key,
@@ -117,6 +127,7 @@ class RootScreen extends StatefulWidget {
     required this.venue,
     required this.locationFn,
     required this.profile,
+    required this.analytics,
     this.ingest,
   });
 
@@ -160,11 +171,13 @@ class _RootScreenState extends State<RootScreen> {
               venue: widget.venue,
               locationFn: widget.locationFn,
               profile: widget.profile,
+              analytics: widget.analytics,
               ingest: widget.ingest,
             ),
             WalletTab(
               dao: widget.dao,
               ingest: widget.ingest,
+              analytics: widget.analytics,
               onWalletChanged: () =>
                   _recommendKey.currentState?.refreshAfterWalletChange(),
             ),
@@ -289,6 +302,7 @@ class RecommendTab extends StatefulWidget {
   final VenueCategoryService venue;
   final LocationFn locationFn;
   final ProfileStore profile;
+  final Analytics analytics;
   final IngestService? ingest;
 
   const RecommendTab({
@@ -297,6 +311,7 @@ class RecommendTab extends StatefulWidget {
     required this.venue,
     required this.locationFn,
     required this.profile,
+    required this.analytics,
     this.ingest,
   });
 
@@ -304,7 +319,8 @@ class RecommendTab extends StatefulWidget {
   State<RecommendTab> createState() => _RecommendTabState();
 }
 
-class _RecommendTabState extends State<RecommendTab> {
+class _RecommendTabState extends State<RecommendTab>
+    with WidgetsBindingObserver {
   String? _selected; // simulation label or 'location'; null = everyday spend
   String? _status;
   _Result? _result;
@@ -333,14 +349,33 @@ class _RecommendTabState extends State<RecommendTab> {
       }
       setState(() {});
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) => _recommend('general'));
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Honor a Siri request ("best card for groceries"), else default view.
+      if (!await _handleSiriRequest()) await _recommend('general');
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _searchCtl.dispose();
     _searchFocus.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _handleSiriRequest();
+  }
+
+  /// If Siri queued a category, show it. Returns true if one was handled.
+  Future<bool> _handleSiriRequest() async {
+    final cat = await consumeSiriCategory();
+    if (cat == null || !mounted) return false;
+    setState(() => _selected = cat == 'general' ? null : cat);
+    await _recommend(cat);
+    return true;
   }
 
   Future<void> refreshAfterWalletChange() async {
@@ -397,6 +432,8 @@ class _RecommendTabState extends State<RecommendTab> {
       return;
     }
     widget.profile.addSearch(merchant); // record (no-op if history disabled)
+    widget.analytics
+        .log(Analytics.searchPerformed, label: categoryForMerchant(merchant));
     setState(() {
       _selected = 'search';
       _searchMerchant = merchant;
@@ -460,6 +497,9 @@ class _RecommendTabState extends State<RecommendTab> {
     ];
     // Most relevant first: offers on cards the user actually holds lead the list.
     offers.sort((a, b) => (b.held ? 1 : 0).compareTo(a.held ? 1 : 0));
+    // Drop near-duplicate offers (same deal, different merchant phrasing).
+    final dedupedOffers =
+        dedupeByText(offers, (o) => '${o.title} ${o.description ?? ''}');
     _Ranked? offerWinner;
     var bestPct = 0.0;
     for (final o in rawOffers) {
@@ -483,9 +523,12 @@ class _RecommendTabState extends State<RecommendTab> {
     }
     if (mounted) {
       setState(() {
-        _merchantOffers = offers;
+        _merchantOffers = dedupedOffers;
         _offerWinner = offerWinner;
       });
+      if (dedupedOffers.isNotEmpty) {
+        widget.analytics.log(Analytics.liveOfferViewed);
+      }
     }
   }
 
@@ -712,6 +755,31 @@ class _RecommendTabState extends State<RecommendTab> {
       _revealed.clear(); // new result -> entrances play once, then stay put
       _result = _Result(category, ranked, hints, offers);
     });
+    widget.analytics.log(Analytics.recommendationShown, label: category);
+    // Keep the home-screen widget in sync with the current best card.
+    final winner = ranked.first;
+    updateBestCardWidget(
+      card: winner.card,
+      category: prettyCategory(category),
+      headline: '${(winner.rec.effectiveRate * 100).toStringAsFixed(2)}%',
+      caption: 'back on ${prettyCategory(category)}',
+    );
+  }
+
+  /// Share the current best-card pick as a branded image.
+  Future<void> _sharePick(_Result r) async {
+    final w = _deckRanked(r).first;
+    final pretty = prettyCategory(r.category);
+    widget.analytics.log(Analytics.proFeatureTapped, label: 'share');
+    await shareBestCard(
+      context,
+      card: w.card,
+      category: pretty,
+      headline: '${(w.rec.effectiveRate * 100).toStringAsFixed(2)}%',
+      caption: _offerWinner != null && _searchMerchant != null
+          ? 'at $_searchMerchant'
+          : 'back on $pretty',
+    );
   }
 
   /// Deck cards: if a merchant %-offer matched a held card, feature it as the
@@ -764,6 +832,7 @@ class _RecommendTabState extends State<RecommendTab> {
                     onTap: () => Navigator.of(context).push(MaterialPageRoute(
                         builder: (_) => ProfileScreen(
                               profile: widget.profile,
+                              analytics: widget.analytics,
                               onRefreshCardData: _refreshCardData,
                               onRemoveAllCards: _removeAllCards,
                             ))),
@@ -863,6 +932,19 @@ class _RecommendTabState extends State<RecommendTab> {
                   category: r.category,
                   winnerCaption:
                       _offerWinner != null ? 'at $_searchMerchant' : null,
+                ),
+              ),
+              _Reveal(
+                order: 2,
+                revealed: _revealed,
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    key: const Key('share_pick'),
+                    onPressed: () => _sharePick(r),
+                    icon: const Icon(Icons.ios_share, size: 18),
+                    label: const Text('Share'),
+                  ),
                 ),
               ),
               if (r.winner.rec.hasCap)
@@ -1396,97 +1478,134 @@ const _categoryIcons = <String, IconData>{
   'general': Icons.card_giftcard_outlined,
 };
 
-class _OfferTile extends StatelessWidget {
+class _OfferTile extends StatefulWidget {
   final OfferInfo offer;
   final String category;
   const _OfferTile({required this.offer, required this.category});
 
   @override
+  State<_OfferTile> createState() => _OfferTileState();
+}
+
+class _OfferTileState extends State<_OfferTile> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
+    final offer = widget.offer;
     final t = Theme.of(context);
     final scheme = t.colorScheme;
     final swatch = parseHex(offer.colorPrimary);
-    return Container(
-      key: const Key('offer'),
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 11),
-      decoration: BoxDecoration(
-        color: scheme.surface,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: (t.brightness == Brightness.dark
-                    ? Colors.black
-                    : const Color(0xFF272219))
-                .withValues(alpha: t.brightness == Brightness.dark ? 0.8 : 0.5),
-            blurRadius: 18,
-            spreadRadius: -14,
-            offset: const Offset(0, 6),
+    final hasDesc =
+        offer.description != null && offer.description!.isNotEmpty;
+    return GestureDetector(
+      onTap: hasDesc ? () => setState(() => _expanded = !_expanded) : null,
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        alignment: Alignment.topCenter,
+        child: Container(
+          key: const Key('offer'),
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 11),
+          decoration: BoxDecoration(
+            color: scheme.surface,
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [
+              BoxShadow(
+                color: (t.brightness == Brightness.dark
+                        ? Colors.black
+                        : const Color(0xFF272219))
+                    .withValues(
+                        alpha: t.brightness == Brightness.dark ? 0.8 : 0.5),
+                blurRadius: 18,
+                spreadRadius: -14,
+                offset: const Offset(0, 6),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(
-              color: scheme.primary.withValues(alpha: 0.10),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(_categoryIcons[category] ?? Icons.card_giftcard_outlined,
-                size: 17, color: scheme.primary),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(offer.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: t.textTheme.titleSmall),
-                if (offer.description != null &&
-                    offer.description!.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(offer.description!,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: t.textTheme.bodyMedium?.copyWith(
-                          fontSize: 12,
-                          height: 1.35,
-                          color: scheme.onSurfaceVariant)),
-                ],
-                const SizedBox(height: 7),
-                Row(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: scheme.primary.withValues(alpha: 0.10),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                    _categoryIcons[widget.category] ??
+                        Icons.card_giftcard_outlined,
+                    size: 17,
+                    color: scheme.primary),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Container(
-                      width: 14,
-                      height: 9,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(2),
-                        color: swatch ?? scheme.onSurfaceVariant,
-                      ),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Text(offer.title,
+                              maxLines: _expanded ? null : 1,
+                              overflow:
+                                  _expanded ? null : TextOverflow.ellipsis,
+                              style: t.textTheme.titleSmall),
+                        ),
+                        if (hasDesc)
+                          Icon(
+                              _expanded
+                                  ? Icons.expand_less
+                                  : Icons.expand_more,
+                              size: 18,
+                              color: scheme.onSurfaceVariant),
+                      ],
                     ),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        offer.cardName.isEmpty
-                            ? offer.cardLabel
-                            : offer.cardName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: t.textTheme.labelSmall?.copyWith(
-                            letterSpacing: 0, color: scheme.onSurfaceVariant),
-                      ),
+                    if (hasDesc) ...[
+                      const SizedBox(height: 2),
+                      Text(offer.description!,
+                          maxLines: _expanded ? null : 2,
+                          overflow: _expanded ? null : TextOverflow.ellipsis,
+                          style: t.textTheme.bodyMedium?.copyWith(
+                              fontSize: 12,
+                              height: 1.35,
+                              color: scheme.onSurfaceVariant)),
+                    ],
+                    const SizedBox(height: 7),
+                    Row(
+                      children: [
+                        Container(
+                          width: 14,
+                          height: 9,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(2),
+                            color: swatch ?? scheme.onSurfaceVariant,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            offer.cardName.isEmpty
+                                ? offer.cardLabel
+                                : offer.cardName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: t.textTheme.labelSmall?.copyWith(
+                                letterSpacing: 0,
+                                color: scheme.onSurfaceVariant),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1780,11 +1899,13 @@ class _DashPainter extends CustomPainter {
 class WalletTab extends StatefulWidget {
   final CardDao dao;
   final IngestService? ingest;
+  final Analytics analytics;
   final VoidCallback? onWalletChanged;
 
   const WalletTab({
     super.key,
     required this.dao,
+    required this.analytics,
     this.ingest,
     this.onWalletChanged,
   });
@@ -1884,12 +2005,25 @@ class _WalletTabState extends State<WalletTab> {
     final added = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
-      builder: (_) => _AddCardSheet(dao: widget.dao, ingest: widget.ingest),
+      builder: (_) => _AddCardSheet(
+          dao: widget.dao, ingest: widget.ingest, analytics: widget.analytics),
     );
     if (added == true) {
       await _load();
       widget.onWalletChanged?.call();
+      if (mounted) _walletToast('Added to your wallet');
     }
+  }
+
+  /// Green confirmation banner that slides down from the top — clear of the
+  /// pinned "Add a card" button and bottom nav.
+  void _walletToast(String message) {
+    final overlay = Overlay.of(context);
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => _TopToast(message: message, onDone: entry.remove),
+    );
+    overlay.insert(entry);
   }
 
   @override
@@ -1997,7 +2131,9 @@ class _EmptyWallet extends StatelessWidget {
 class _AddCardSheet extends StatefulWidget {
   final CardDao dao;
   final IngestService? ingest;
-  const _AddCardSheet({required this.dao, this.ingest});
+  final Analytics analytics;
+  const _AddCardSheet(
+      {required this.dao, required this.analytics, this.ingest});
 
   @override
   State<_AddCardSheet> createState() => _AddCardSheetState();
@@ -2007,8 +2143,11 @@ class _AddCardSheetState extends State<_AddCardSheet> {
   final _name = TextEditingController();
   bool _busy = false;
   String? _error;
-  // Face color is a user choice, not guessed. Starts on a random preset.
+  // Card colour is chosen after the fetch, once the card is on screen.
   CardGradient _gradient = randomGradient();
+  // Fetched card payload(s); null until the doc is fetched. Non-null flips the
+  // sheet from "type a name" to "here's your card — pick a colour".
+  List<Map<String, dynamic>>? _fetched;
 
   @override
   void dispose() {
@@ -2016,7 +2155,8 @@ class _AddCardSheetState extends State<_AddCardSheet> {
     super.dispose();
   }
 
-  Future<void> _submit() async {
+  /// Step 1: fetch the card's rewards. On success, reveal the card + colours.
+  Future<void> _fetch() async {
     final ingest = widget.ingest;
     // Validate/sanitize the card name before it leaves the device.
     final String name;
@@ -2042,8 +2182,27 @@ class _AddCardSheetState extends State<_AddCardSheet> {
     });
     try {
       final cards = await ingest.ingest(name);
-      // First card uses the picked gradient; a multi-card product (e.g. a
-      // dual-card set) gets distinct presets so the cards look different.
+      setState(() {
+        _busy = false;
+        _fetched = cards;
+        _gradient = randomGradient(); // assign a colour, highlighted below
+      });
+    } catch (e) {
+      widget.analytics.log(Analytics.cardAddedFail);
+      setState(() {
+        _busy = false;
+        _error = '$e';
+      });
+    }
+  }
+
+  /// Step 2: persist the fetched card(s) with the chosen colour.
+  Future<void> _confirm() async {
+    final cards = _fetched;
+    if (cards == null) return;
+    setState(() => _busy = true);
+    try {
+      // First card uses the chosen gradient; extras get distinct presets.
       final palette = distinctGradients(_gradient, cards.length);
       for (var i = 0; i < cards.length; i++) {
         await widget.dao.insertExtraction(
@@ -2052,6 +2211,7 @@ class _AddCardSheetState extends State<_AddCardSheet> {
           colorSecondary: palette[i].secondary,
         );
       }
+      widget.analytics.log(Analytics.cardAddedSuccess);
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       setState(() {
@@ -2061,10 +2221,27 @@ class _AddCardSheetState extends State<_AddCardSheet> {
     }
   }
 
+  CardInfo _previewCard(Map<String, dynamic> data, CardGradient g) {
+    final c = data['card'] as Map<String, dynamic>;
+    return CardInfo(
+      id: c['id'] as String,
+      name: c['name'] as String? ?? '',
+      issuer: c['issuer'] as String? ?? '',
+      network: c['network'] as String? ?? 'other',
+      colorPrimary: g.primary,
+      colorSecondary: g.secondary,
+      held: false,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
     final scheme = t.colorScheme;
+    final fetched = _fetched;
+    final palette =
+        fetched == null ? const <CardGradient>[] : distinctGradients(_gradient, fetched.length);
+
     return Padding(
       padding: EdgeInsets.fromLTRB(
           20, 14, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
@@ -2082,39 +2259,44 @@ class _AddCardSheetState extends State<_AddCardSheet> {
             ),
           ),
           const SizedBox(height: 18),
-          Text('Add a card',
+          Text(fetched == null ? 'Add a card' : 'Pick a colour',
               style: GoogleFontsSafe.title(t)),
           const SizedBox(height: 5),
-          Text('Type the card name. We find its rewards.',
+          Text(
+              fetched == null
+                  ? 'Type the card name. We find its rewards.'
+                  : 'Tap a colour, then add it to your wallet.',
               style: t.textTheme.bodyMedium
                   ?.copyWith(color: scheme.onSurfaceVariant)),
           const SizedBox(height: 16),
-          TextField(
-            key: const Key('new_card_field'),
-            controller: _name,
-            enabled: !_busy,
-            autofocus: true,
-            textInputAction: TextInputAction.go,
-            decoration: InputDecoration(
-              hintText: 'e.g. Emirates NBD Titanium',
-              errorText: null,
-              enabledBorder: _busy
-                  ? null
-                  : OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14),
-                      borderSide: _error != null
-                          ? BorderSide(color: scheme.error)
-                          : BorderSide.none),
+
+          // --- Step 1: name input (hidden once fetched) ---
+          if (fetched == null)
+            TextField(
+              key: const Key('new_card_field'),
+              controller: _name,
+              enabled: !_busy,
+              autofocus: true,
+              textInputAction: TextInputAction.go,
+              decoration: InputDecoration(
+                hintText: 'e.g. Emirates NBD Titanium',
+                enabledBorder: _busy
+                    ? null
+                    : OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: _error != null
+                            ? BorderSide(color: scheme.error)
+                            : BorderSide.none),
+              ),
+              onSubmitted: (_) => _fetch(),
             ),
-            onSubmitted: (_) => _submit(),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 8),
-            Text(_error!,
-                key: const Key('add_card_error'),
-                style: t.textTheme.bodySmall?.copyWith(color: scheme.error)),
-          ],
-          if (!_busy) ...[
+
+          // --- Step 2: card preview + colour picker ---
+          if (fetched != null) ...[
+            for (var i = 0; i < fetched.length; i++) ...[
+              if (i > 0) const SizedBox(height: 12),
+              CardVisual(card: _previewCard(fetched[i], palette[i])),
+            ],
             const SizedBox(height: 18),
             Text('Card colour',
                 style: t.textTheme.bodySmall
@@ -2125,6 +2307,14 @@ class _AddCardSheetState extends State<_AddCardSheet> {
               onSelected: (g) => setState(() => _gradient = g),
             ),
           ],
+
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(_error!,
+                key: const Key('add_card_error'),
+                style: t.textTheme.bodySmall?.copyWith(color: scheme.error)),
+          ],
+
           const SizedBox(height: 16),
           if (_busy)
             Column(
@@ -2144,8 +2334,8 @@ class _AddCardSheetState extends State<_AddCardSheet> {
           else
             FilledButton(
               key: const Key('confirm_add_card'),
-              onPressed: _submit,
-              child: const Text('Add card'),
+              onPressed: fetched == null ? _fetch : _confirm,
+              child: Text(fetched == null ? 'Find card' : 'Add card'),
             ),
         ],
       ),
@@ -2158,6 +2348,96 @@ class GoogleFontsSafe {
   static TextStyle title(ThemeData t) =>
       (t.textTheme.displaySmall ?? const TextStyle())
           .copyWith(fontSize: 20, fontWeight: FontWeight.w500);
+}
+
+/// Success banner that slides in from the top, holds ~2.4s, slides out.
+class _TopToast extends StatefulWidget {
+  final String message;
+  final VoidCallback onDone;
+  const _TopToast({required this.message, required this.onDone});
+
+  @override
+  State<_TopToast> createState() => _TopToastState();
+}
+
+class _TopToastState extends State<_TopToast>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 260));
+
+  @override
+  void initState() {
+    super.initState();
+    _run();
+  }
+
+  Future<void> _run() async {
+    await _c.forward();
+    await Future.delayed(const Duration(milliseconds: 2400));
+    if (mounted) await _c.reverse();
+    widget.onDone();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final curve = CurvedAnimation(parent: _c, curve: Curves.easeOutCubic);
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: SafeArea(
+        bottom: false,
+        child: SlideTransition(
+          position: Tween(begin: const Offset(0, -1), end: Offset.zero)
+              .animate(curve),
+          child: FadeTransition(
+            opacity: curve,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: scheme.primary,
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.18),
+                        blurRadius: 20,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.check_circle,
+                          color: scheme.onPrimary, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(widget.message,
+                            style: TextStyle(
+                                color: scheme.onPrimary,
+                                fontWeight: FontWeight.w600)),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// Horizontal row of tappable gradient swatches for the add-card sheet.

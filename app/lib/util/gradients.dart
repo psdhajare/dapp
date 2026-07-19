@@ -19,7 +19,8 @@ const presetGradients = <CardGradient>[
   CardGradient('Amber', '#E08A2E', '#B5661A'),
   CardGradient('Wine', '#5A2438', '#331320'),
   CardGradient('Royal', '#3D2A63', '#20153A'),
-  CardGradient('Silver', '#E9E6DE', '#C6C0B3'),
+  CardGradient('Silver', '#C7CCD1', '#8B9299'),
+  CardGradient('White', '#FCFCFA', '#E6E4DE'),
 ];
 
 /// A random preset — the default assigned before the user picks one.
