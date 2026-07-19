@@ -1,0 +1,19 @@
+# SearXNG config for the ingestion service. Inherits SearXNG defaults, then
+# overrides only what we need: JSON API on, limiter off (internal use), Redis.
+#
+# IMPORTANT: replace secret_key with a random value, e.g.
+#   sed -i "s/CHANGE_ME_TO_A_RANDOM_SECRET/$(openssl rand -hex 32)/" config/settings.yml
+use_default_settings: true
+
+server:
+  secret_key: "CHANGE_ME_TO_A_RANDOM_SECRET"
+  limiter: false          # internal, trusted caller — don't rate-limit our JSON calls
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json                # the ingestion service calls /search?format=json
+
+redis:
+  url: redis://valkey:6379/0

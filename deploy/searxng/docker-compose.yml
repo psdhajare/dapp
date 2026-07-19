@@ -1,0 +1,30 @@
+# Self-hosted SearXNG for the ingestion service's web search (keyless, free).
+# Run on the same host as the ingestion service, then set in /opt/dapp/.env:
+#     SEARXNG_URL=http://localhost:8888
+#
+#   docker compose up -d
+#
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./config:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    depends_on:
+      - valkey
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: searxng-valkey
+    command: valkey-server --save 30 1 --loglevel warning
+    volumes:
+      - valkey-data:/data
+    restart: unless-stopped
+
+volumes:
+  valkey-data:
