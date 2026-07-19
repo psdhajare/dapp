@@ -19,7 +19,7 @@ CREATE TABLE cards (
     id                 TEXT PRIMARY KEY,
     name               TEXT NOT NULL,
     issuer             TEXT NOT NULL,
-    network            TEXT NOT NULL CHECK (network IN ('visa', 'mastercard', 'amex', 'other')),
+    network            TEXT NOT NULL,  -- payment scheme; validated in Python
     currency           TEXT NOT NULL DEFAULT 'GBP',
     annual_fee         REAL NOT NULL DEFAULT 0,
     apr                REAL,     -- annual percentage rate on balances (%)

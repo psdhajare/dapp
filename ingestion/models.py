@@ -11,7 +11,10 @@ VALID_CATEGORIES = {
 }
 VALID_UNITS = {"cashback_pct", "points_per_unit"}
 VALID_CAP_PERIODS = {"none", "monthly", "quarterly", "yearly"}
-VALID_NETWORKS = {"visa", "mastercard", "amex", "other"}
+VALID_NETWORKS = {
+    "visa", "mastercard", "amex", "rupay", "diners", "discover",
+    "unionpay", "jcb", "other",
+}
 
 
 _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")

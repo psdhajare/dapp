@@ -44,23 +44,39 @@ def run_auto(card_name: str, db_path: str, provider: str | None,
                    db_path=db_path, provider=provider, client=client)
 
 
-# Signals a page actually carries the rate/fee facts we need.
-_RATE_HINTS = ("apr", "interest rate", "profit rate", "per month", "monthly rate",
-               "% p.a", "annual percentage", "schedule of charges", "key facts")
+# Phrases that mark where the interest rate actually appears on a page.
+_RATE_KEYWORDS = (
+    "rate of interest", "% per month", "per month", "monthly rate",
+    "annual percentage", "% p.a", "apr", "profit rate", "finance charge",
+    "interest rate",
+)
 
 
-def _fees_text(card_name: str, limit: int = 14000) -> str:
+def _rate_window(text: str) -> str:
+    """Text around the first interest-rate mention — captures the rate even when
+    it's buried deep in a long MITC/schedule-of-charges PDF."""
+    low = text.lower()
+    for kw in _RATE_KEYWORDS:
+        i = low.find(kw)
+        if i != -1:
+            return text[max(0, i - 600):i + 3000]
+    return ""
+
+
+def _fees_text(card_name: str, limit: int = 16000) -> str:
     """Best-effort text of the card's rate/fee pages (APR, fees, salary).
 
-    APR usually lives on a 'Key Facts Statement' or 'Schedule of Charges' page
-    (often a PDF), quoted as a monthly/profit rate — so we search several angles
-    and combine the readable rate-bearing pages. Worth the extra fetches: these
-    are facts the user must see, and add-card is infrequent.
+    APR lives on a Key-Facts / Schedule-of-Charges / MITC page (often a long
+    PDF), quoted as a monthly/profit rate. We search several angles and pull the
+    window around the rate on each rate-bearing page, so the figure isn't lost
+    to truncation. Worth the extra fetches — add-card is infrequent.
     """
     queries = (
+        f"{card_name} MITC rate of interest",
+        f"{card_name} interest rate per month",
+        f"{card_name} fees and charges",
+        f"{card_name} schedule of charges",
         f"{card_name} key facts statement",
-        f"{card_name} schedule of charges interest rate",
-        f"{card_name} monthly interest profit rate fees",
     )
     seen: list[str] = []
     for q in queries:
@@ -72,16 +88,16 @@ def _fees_text(card_name: str, limit: int = 14000) -> str:
             continue
     parts: list[str] = []
     total = 0
-    for u in seen[:8]:
+    for u in seen[:10]:
         try:
             t = discover.fetch_text(u, timeout=15)
         except Exception:
             continue
-        if not any(h in t.lower() for h in _RATE_HINTS):
+        window = _rate_window(t)
+        if not window:
             continue
-        chunk = t[:6000]
-        parts.append(chunk)
-        total += len(chunk)
+        parts.append(window)
+        total += len(window)
         if total >= limit:
             break
     return "\n\n".join(parts)[:limit]

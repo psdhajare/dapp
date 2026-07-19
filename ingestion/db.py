@@ -30,22 +30,54 @@ class Database:
         else:
             self._migrate()
 
-    # Columns added after the initial schema. Existing DBs get them via
-    # ALTER TABLE so an old cards.db keeps working without a rebuild.
-    _CARD_ADDED_COLUMNS = {
-        "apr": "REAL",
-        "foreign_tx_fee": "REAL",
-        "min_salary": "REAL",
-        "interest_free_days": "INTEGER",
-    }
+    # Canonical cards columns (order matters for the copy during a rebuild).
+    _CARD_COLUMNS = [
+        ("id", "TEXT PRIMARY KEY"),
+        ("name", "TEXT NOT NULL"),
+        ("issuer", "TEXT NOT NULL"),
+        ("network", "TEXT NOT NULL"),  # no CHECK — validated in Python
+        ("currency", "TEXT NOT NULL DEFAULT 'GBP'"),
+        ("annual_fee", "REAL NOT NULL DEFAULT 0"),
+        ("apr", "REAL"),
+        ("foreign_tx_fee", "REAL"),
+        ("min_salary", "REAL"),
+        ("interest_free_days", "INTEGER"),
+        ("color_primary", "TEXT"),
+        ("color_secondary", "TEXT"),
+    ]
 
     def _migrate(self) -> None:
         have = {r["name"] for r in
                 self.conn.execute("PRAGMA table_info(cards)").fetchall()}
-        for col, decl in self._CARD_ADDED_COLUMNS.items():
-            if col not in have:
-                self.conn.execute(f"ALTER TABLE cards ADD COLUMN {col} {decl}")
+        ddl = (self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='cards'"
+        ).fetchone() or [""])[0] or ""
+        canonical = {c for c, _ in self._CARD_COLUMNS}
+        needs_columns = not canonical.issubset(have)
+        has_check = "CHECK" in ddl.upper()
+        if not needs_columns and not has_check:
+            return
+        if has_check:
+            # Can't drop a CHECK via ALTER — rebuild the table without it,
+            # picking up any missing columns in the same pass.
+            self._rebuild_cards(have)
+        else:
+            for col, decl in self._CARD_COLUMNS:
+                if col not in have:
+                    self.conn.execute(f"ALTER TABLE cards ADD COLUMN {col} {decl}")
         self.conn.commit()
+
+    def _rebuild_cards(self, have: set[str]) -> None:
+        cols_sql = ", ".join(f"{c} {d}" for c, d in self._CARD_COLUMNS)
+        common = [c for c, _ in self._CARD_COLUMNS if c in have]
+        joined = ", ".join(common)
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        self.conn.execute(f"CREATE TABLE cards_new ({cols_sql})")
+        self.conn.execute(
+            f"INSERT INTO cards_new ({joined}) SELECT {joined} FROM cards")
+        self.conn.execute("DROP TABLE cards")
+        self.conn.execute("ALTER TABLE cards_new RENAME TO cards")
+        self.conn.execute("PRAGMA foreign_keys = ON")
 
     def load_seed(self) -> None:
         self.conn.executescript(SEED_PATH.read_text())

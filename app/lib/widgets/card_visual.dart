@@ -297,8 +297,25 @@ class _NetworkMark extends StatelessWidget {
                 color: ink,
                 fontWeight: FontWeight.w800,
                 letterSpacing: 1));
-      default:
+      case 'other':
         return const SizedBox.shrink();
+      default:
+        // rupay, diners, discover, unionpay, jcb, … — a clean text wordmark.
+        return Text(_wordmark(network),
+            style: TextStyle(
+                fontSize: 13,
+                color: ink,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.5));
     }
   }
+
+  static String _wordmark(String n) => switch (n) {
+        'rupay' => 'RuPay',
+        'diners' => 'Diners',
+        'discover' => 'Discover',
+        'unionpay' => 'UnionPay',
+        'jcb' => 'JCB',
+        _ => n.toUpperCase(),
+      };
 }

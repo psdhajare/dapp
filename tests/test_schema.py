@@ -42,13 +42,13 @@ def test_categories_seeded_by_schema():
     assert count == 11
 
 
-def test_network_check_constraint():
-    db = fresh_db()
-    with pytest.raises(sqlite3.IntegrityError):
-        db.conn.execute(
-            "INSERT INTO cards (id, name, issuer, network) "
-            "VALUES ('x', 'X', 'Y', 'discover')"
-        )
+def test_network_validated_in_python_not_db():
+    # The DB no longer constrains network (so new schemes like rupay work);
+    # validity is enforced by Card.validate().
+    from ingestion.models import Card
+    Card(id="x", name="X", issuer="Y", network="rupay").validate()  # ok
+    with pytest.raises(ValueError):
+        Card(id="x", name="X", issuer="Y", network="bogusnet").validate()
 
 
 def test_seed_loads_and_reads():

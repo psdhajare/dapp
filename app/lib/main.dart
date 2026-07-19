@@ -1291,6 +1291,11 @@ class _CardInfoSheet extends StatelessWidget {
         'mastercard' => 'Mastercard',
         'visa' => 'Visa',
         'amex' => 'American Express',
+        'rupay' => 'RuPay',
+        'diners' => 'Diners Club',
+        'discover' => 'Discover',
+        'unionpay' => 'UnionPay',
+        'jcb' => 'JCB',
         _ => 'Card',
       };
 

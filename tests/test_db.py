@@ -19,6 +19,24 @@ def test_upsert_and_read_card():
     assert db.get_card("amex") == card
 
 
+def test_migrate_drops_network_check_constraint():
+    # Old DB with a CHECK that only allowed visa/mastercard/amex/other.
+    db = Database()
+    db.conn.executescript("""
+        CREATE TABLE categories (name TEXT PRIMARY KEY);
+        CREATE TABLE cards (id TEXT PRIMARY KEY, name TEXT, issuer TEXT,
+            network TEXT NOT NULL CHECK (network IN ('visa','mastercard','amex','other')),
+            currency TEXT DEFAULT 'AED', annual_fee REAL DEFAULT 0,
+            color_primary TEXT, color_secondary TEXT);
+        INSERT INTO cards (id,name,issuer,network) VALUES ('a','A','B','visa');
+    """)
+    db.init_schema_if_needed()  # rebuilds cards without the CHECK
+    db.upsert_card(Card(id="r", name="R", issuer="IDFC", network="rupay",
+                        apr=42.0))
+    assert db.get_card("r").network == "rupay"
+    assert db.get_card("a").network == "visa"  # existing row preserved
+
+
 def test_migrate_adds_missing_cost_columns():
     # Simulate an old cards.db without the newer columns, then migrate.
     db = Database()
