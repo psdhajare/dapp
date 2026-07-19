@@ -19,6 +19,21 @@ def test_upsert_and_read_card():
     assert db.get_card("amex") == card
 
 
+def test_startup_heals_missing_categories():
+    from ingestion.models import VALID_CATEGORIES
+    db = Database()
+    db.conn.executescript("""
+        CREATE TABLE categories (name TEXT PRIMARY KEY);
+        INSERT INTO categories (name) VALUES ('dining'), ('general');
+        CREATE TABLE cards (id TEXT PRIMARY KEY, name TEXT, issuer TEXT,
+            network TEXT, currency TEXT, annual_fee REAL,
+            color_primary TEXT, color_secondary TEXT);
+    """)
+    db.init_schema_if_needed()
+    have = {r["name"] for r in db.conn.execute("SELECT name FROM categories")}
+    assert VALID_CATEGORIES <= have  # all current categories now present
+
+
 def test_ingest_cache_roundtrip_and_staleness():
     db = Database()
     db.init_schema_if_needed()

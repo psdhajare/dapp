@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .models import Card, Offer, PointsValuation, RewardRule
+from .models import VALID_CATEGORIES, Card, Offer, PointsValuation, RewardRule
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "db" / "schema.sql"
 SEED_PATH = Path(__file__).resolve().parent.parent / "db" / "seed.sql"
@@ -34,6 +34,11 @@ class Database:
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS ingest_cache ("
             "query_key TEXT PRIMARY KEY, card_ids TEXT NOT NULL, fetched_at TEXT)")
+        # Heal the categories table: older DBs were seeded with fewer categories,
+        # so a rule with a newer one (e.g. beauty/health) would fail its FK.
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO categories (name) VALUES (?)",
+            [(c,) for c in sorted(VALID_CATEGORIES)])
         self.conn.commit()
 
     def cache_get_ids(self, key: str, max_age_days: int = 7) -> list[str] | None:
