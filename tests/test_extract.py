@@ -56,6 +56,19 @@ def test_extract_captures_cost_facts_and_coerces():
     assert card.interest_free_days == 55
 
 
+def test_extract_ignores_null_points_valuation():
+    # LLM often returns a valuation stub with null fields for cashback cards —
+    # must not crash (regression: '<=' None vs int TypeError).
+    data = json.dumps({
+        "card": {"id": "c", "name": "C", "issuer": "B", "network": "visa",
+                 "currency": "AED", "annual_fee": 0},
+        "rules": [], "points_valuation": {"points_currency": None,
+                                          "value_per_point": None},
+    })
+    result = extract("doc", FakeLLM(data), source_ref="x")
+    assert result.valuation is None
+
+
 def test_extract_rejects_malformed_json():
     with pytest.raises(ValueError):
         extract("doc", FakeLLM("not json"), source_ref="x")

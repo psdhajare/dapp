@@ -189,9 +189,17 @@ def _extract_one(data: dict, source_ref: str) -> Extraction:
         offers.append(offer)
 
     valuation = None
-    if data.get("points_valuation"):
-        valuation = PointsValuation(card_id=card.id, **data["points_valuation"])
-        valuation.validate()
+    pv = data.get("points_valuation")
+    # Only build a valuation when the model actually gave a value — it often
+    # returns a stub with null fields for cashback cards, which must not crash.
+    if isinstance(pv, dict) and pv.get("value_per_point") is not None \
+            and pv.get("points_currency"):
+        try:
+            valuation = PointsValuation(card_id=card.id, **pv)
+            valuation.validate()
+        except (TypeError, ValueError) as e:
+            warnings.append(f"ignored invalid points_valuation: {e}")
+            valuation = None
 
     return Extraction(card=card, rules=rules, valuation=valuation,
                       offers=offers, warnings=warnings)
