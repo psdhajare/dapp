@@ -121,12 +121,12 @@ def _gather_urls(merchant: str, country: str = "") -> list[str]:
     """Merge results from several offer-focused queries, de-duped. More angles
     raise recall so we don't miss the one page that lists the offer."""
     seen: list[str] = []
-    loc = country or "UAE"
+    c = f" {country}" if country else ""
     queries = (
-        f'"{merchant}" credit card offer {loc}',
-        f"{merchant} card discount deal {loc}",
-        f"{merchant} bank offer promotion {loc}",
-        f"{merchant} cashback credit card {loc}",
+        f'"{merchant}" credit card offer{c}',
+        f"{merchant} card discount deal{c}",
+        f"{merchant} bank offer promotion{c}",
+        f"{merchant} cashback credit card{c}",
     )
     for q in queries:
         try:

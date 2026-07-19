@@ -5,6 +5,7 @@ import 'package:engine/engine.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
+import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'analytics.dart';
@@ -745,6 +746,19 @@ class _RecommendTabState extends State<RecommendTab>
     Future.delayed(const Duration(seconds: 3), m.hideCurrentSnackBar);
   }
 
+  /// Reverse-geocode the device position to a country and set it as the
+  /// (auto) region — unless the user has picked one. Best-effort, silent.
+  Future<void> _detectCountry(double lat, double lng) async {
+    if (widget.profile.countryUserSet) return;
+    try {
+      final marks = await placemarkFromCoordinates(lat, lng);
+      final country = marks.isNotEmpty ? (marks.first.country ?? '') : '';
+      if (country.isNotEmpty) await widget.profile.autoDetectCountry(country);
+    } catch (_) {
+      // Geocoding unavailable — leave country as-is.
+    }
+  }
+
   Future<void> _useLocation() async {
     setState(() {
       _selected = 'location';
@@ -760,6 +774,7 @@ class _RecommendTabState extends State<RecommendTab>
     });
     try {
       final (lat, lng) = await widget.locationFn();
+      _detectCountry(lat, lng); // fire-and-forget, best effort
       final category = await widget.venue.categoryAt(lat, lng) ?? 'general';
       await _recommend(category);
       _celebrate(_result?.winner.rec.effectiveRate ?? 0, live: false);
@@ -1301,13 +1316,23 @@ class _CardInfoSheet extends StatelessWidget {
         _ => 'Card',
       };
 
-  /// APR risk bands: <15 purple, 15–20 green, 20–25 orange, >25 red.
+  static const _green = Color(0xFF2E9E5B);
+  static const _orange = Color(0xFFE08A2E);
+  static const _red = Color(0xFFD64545);
+
+  /// APR bands: <20 green, 20–25 orange, >25 red.
   Color? _aprColor(double? apr) {
     if (apr == null) return null;
-    if (apr < 15) return const Color(0xFF7E57C2); // purple
-    if (apr < 20) return const Color(0xFF2E9E5B); // green
-    if (apr < 25) return const Color(0xFFE08A2E); // orange
-    return const Color(0xFFD64545); // red
+    if (apr < 20) return _green;
+    if (apr < 25) return _orange;
+    return _red;
+  }
+
+  /// Annual-fee bands: 0/free green, <100 orange, >=100 red.
+  Color _feeColor(double fee) {
+    if (fee <= 0) return _green;
+    if (fee < 100) return _orange;
+    return _red;
   }
 
   String _rateLabel(RuleInfo r) => r.unit == 'points_per_unit'
@@ -1375,7 +1400,9 @@ class _CardInfoSheet extends StatelessWidget {
                         value: value,
                         valueColor: label.startsWith('APR')
                             ? _aprColor(details.apr)
-                            : null),
+                            : label == 'Annual fee'
+                                ? _feeColor(details.annualFee)
+                                : null),
                   const SizedBox(height: 20),
                   Text('REWARDS', style: t.textTheme.labelSmall),
                   const SizedBox(height: 8),

@@ -6,6 +6,9 @@ import '../analytics.dart';
 import '../profile_store.dart';
 import '../theme/concierge_theme.dart';
 
+/// Country dropdown sentinel: let device location decide.
+const _kAuto = 'Auto-detect (location)';
+
 /// Markets we search offers/rates for. UAE-first, then the wider GCC + common
 /// expat home countries.
 const kCountries = <String>[
@@ -127,23 +130,35 @@ class _ProfileScreenState extends State<ProfileScreen> {
           const _Eyebrow('REGION'),
           AnimatedBuilder(
             animation: widget.profile,
-            builder: (context, _) => _SurfaceCard(
-              children: [
-                _DropdownRow(
-                  title: 'Country',
-                  value: widget.profile.country,
-                  options: kCountries,
-                  onChanged: (v) => widget.profile.setCountry(v),
-                ),
-                const _InsetDivider(),
-                _DropdownRow(
-                  title: 'Primary currency',
-                  value: widget.profile.currency,
-                  options: kCurrencies,
-                  onChanged: (v) => widget.profile.setCurrency(v),
-                ),
-              ],
-            ),
+            builder: (context, _) {
+              final country = widget.profile.country;
+              // 'Auto-detect' == let location decide; include any detected
+              // country not already in the fixed list so it still displays.
+              final countryOptions = <String>[
+                _kAuto,
+                if (country.isNotEmpty && !kCountries.contains(country)) country,
+                ...kCountries,
+              ];
+              return _SurfaceCard(
+                children: [
+                  _DropdownRow(
+                    title: 'Country',
+                    value: country.isEmpty ? _kAuto : country,
+                    options: countryOptions,
+                    onChanged: (v) => v == _kAuto
+                        ? widget.profile.clearCountry()
+                        : widget.profile.setCountry(v),
+                  ),
+                  const _InsetDivider(),
+                  _DropdownRow(
+                    title: 'Primary currency',
+                    value: widget.profile.currency,
+                    options: kCurrencies,
+                    onChanged: (v) => widget.profile.setCurrency(v),
+                  ),
+                ],
+              );
+            },
           ),
 
           // SEARCH

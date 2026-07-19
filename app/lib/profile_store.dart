@@ -8,6 +8,7 @@ class ProfileStore extends ChangeNotifier {
   static const _kHistOn = 'search_history_enabled';
   static const _kHist = 'search_history';
   static const _kCountry = 'country';
+  static const _kCountryUserSet = 'country_user_set';
   static const _kCurrency = 'currency';
   static const _maxHistory = 10;
 
@@ -17,6 +18,7 @@ class ProfileStore extends ChangeNotifier {
   bool _historyEnabled;
   List<String> _history;
   String _country;
+  bool _countryUserSet;
   String _currency;
 
   ProfileStore(this._prefs)
@@ -24,7 +26,8 @@ class ProfileStore extends ChangeNotifier {
         _themeMode = _parseTheme(_prefs.getString(_kTheme)),
         _historyEnabled = _prefs.getBool(_kHistOn) ?? true,
         _history = _prefs.getStringList(_kHist) ?? [],
-        _country = _prefs.getString(_kCountry) ?? 'United Arab Emirates',
+        _country = _prefs.getString(_kCountry) ?? '', // none until known
+        _countryUserSet = _prefs.getBool(_kCountryUserSet) ?? false,
         _currency = _prefs.getString(_kCurrency) ?? 'AED';
 
   static Future<ProfileStore> load() async =>
@@ -35,9 +38,30 @@ class ProfileStore extends ChangeNotifier {
   bool get searchHistoryEnabled => _historyEnabled;
   List<String> get searchHistory => List.unmodifiable(_history);
   String get country => _country;
+  bool get countryUserSet => _countryUserSet;
   String get currency => _currency;
 
+  /// User explicitly picked a country (won't be overridden by auto-detect).
   Future<void> setCountry(String value) async {
+    _country = value;
+    _countryUserSet = true;
+    await _prefs.setString(_kCountry, value);
+    await _prefs.setBool(_kCountryUserSet, true);
+    notifyListeners();
+  }
+
+  /// Switch back to auto (location-driven) country.
+  Future<void> clearCountry() async {
+    _country = '';
+    _countryUserSet = false;
+    await _prefs.remove(_kCountry);
+    await _prefs.setBool(_kCountryUserSet, false);
+    notifyListeners();
+  }
+
+  /// Populate from device location — only if the user hasn't picked one.
+  Future<void> autoDetectCountry(String value) async {
+    if (_countryUserSet || value.isEmpty || value == _country) return;
     _country = value;
     await _prefs.setString(_kCountry, value);
     notifyListeners();
