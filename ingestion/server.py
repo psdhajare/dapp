@@ -17,6 +17,7 @@ import json
 import os
 import threading
 import time
+import traceback
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -114,8 +115,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, {"error": "not found"})
         except InputError as e:
             self._send(400, {"error": str(e)})
-        except Exception as e:  # surface any pipeline failure to the app
-            self._send(500, {"error": f"{type(e).__name__}: {e}"})
+        except Exception as e:  # log full detail server-side; app shows a
+            # friendly message. Keep a short code in the body for support.
+            traceback.print_exc()
+            self._send(500, {"error": "server_error", "detail": f"{type(e).__name__}: {e}"})
 
     def _handle_ingest(self):
         req = self._read_json()

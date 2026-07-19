@@ -27,6 +27,9 @@ import 'util/offer_dedupe.dart';
 import 'venue.dart';
 import 'widgets/card_visual.dart';
 
+/// Shown for any server/network failure — the real cause is in the server logs.
+const kFriendlyError = 'Oops, something went wrong. Try again later.';
+
 /// Returns current position as (lat, lng).
 typedef LocationFn = Future<(double, double)> Function();
 
@@ -514,13 +517,12 @@ class _RecommendTabState extends State<RecommendTab>
       await widget.dao.cacheSearch(key, data,
           ttl: hasOffers ? const Duration(hours: 24) : const Duration(minutes: 30));
       await _applySearchPayload(data);
-    } on IngestException catch (e) {
+    } catch (_) {
+      // Server/network failure — friendly message, real cause is in server logs.
       if (mounted) {
         setState(() => _merchantOffers = const []);
-        _toast(e.message);
+        _toast(kFriendlyError);
       }
-    } catch (_) {
-      if (mounted) setState(() => _merchantOffers = const []);
     } finally {
       if (mounted) setState(() => _searchLoading = false);
     }
@@ -2644,11 +2646,11 @@ class _AddCardSheetState extends State<_AddCardSheet> {
         _fetched = cards;
         _gradient = randomGradient(); // assign a colour, highlighted below
       });
-    } catch (e) {
+    } catch (_) {
       widget.analytics.log(Analytics.cardAddedFail);
       setState(() {
         _busy = false;
-        _error = '$e';
+        _error = kFriendlyError;
       });
     }
   }
@@ -2670,10 +2672,10 @@ class _AddCardSheetState extends State<_AddCardSheet> {
       }
       widget.analytics.log(Analytics.cardAddedSuccess);
       if (mounted) Navigator.of(context).pop(true);
-    } catch (e) {
+    } catch (_) {
       setState(() {
         _busy = false;
-        _error = '$e';
+        _error = kFriendlyError;
       });
     }
   }

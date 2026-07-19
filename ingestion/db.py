@@ -27,6 +27,25 @@ class Database:
         ).fetchone()
         if not exists:
             self.init_schema()
+        else:
+            self._migrate()
+
+    # Columns added after the initial schema. Existing DBs get them via
+    # ALTER TABLE so an old cards.db keeps working without a rebuild.
+    _CARD_ADDED_COLUMNS = {
+        "apr": "REAL",
+        "foreign_tx_fee": "REAL",
+        "min_salary": "REAL",
+        "interest_free_days": "INTEGER",
+    }
+
+    def _migrate(self) -> None:
+        have = {r["name"] for r in
+                self.conn.execute("PRAGMA table_info(cards)").fetchall()}
+        for col, decl in self._CARD_ADDED_COLUMNS.items():
+            if col not in have:
+                self.conn.execute(f"ALTER TABLE cards ADD COLUMN {col} {decl}")
+        self.conn.commit()
 
     def load_seed(self) -> None:
         self.conn.executescript(SEED_PATH.read_text())

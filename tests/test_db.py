@@ -19,6 +19,23 @@ def test_upsert_and_read_card():
     assert db.get_card("amex") == card
 
 
+def test_migrate_adds_missing_cost_columns():
+    # Simulate an old cards.db without the newer columns, then migrate.
+    db = Database()
+    db.conn.executescript("""
+        CREATE TABLE categories (name TEXT PRIMARY KEY);
+        CREATE TABLE cards (id TEXT PRIMARY KEY, name TEXT, issuer TEXT,
+            network TEXT, currency TEXT DEFAULT 'AED', annual_fee REAL DEFAULT 0,
+            color_primary TEXT, color_secondary TEXT);
+    """)
+    db.init_schema_if_needed()  # detects existing cards table -> migrates
+    cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(cards)")}
+    assert {"apr", "foreign_tx_fee", "min_salary", "interest_free_days"} <= cols
+    # And an upsert with the new fields now works.
+    db.upsert_card(Card(id="c", name="C", issuer="B", network="visa", apr=39.0))
+    assert db.get_card("c").apr == 39.0
+
+
 def test_upsert_card_is_idempotent():
     db = db_with_categories()
     db.upsert_card(Card(id="amex", name="Old", issuer="AmEx", network="amex"))

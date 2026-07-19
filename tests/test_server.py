@@ -82,7 +82,8 @@ def test_ingest_missing_card_400(running_server):
 def test_ingest_pipeline_failure_500(running_server):
     status, body = _post(f"{running_server}/ingest", {"card": "Broken Card"})
     assert status == 500
-    assert "LookupError" in body["error"]
+    assert body["error"] == "server_error"
+    assert "LookupError" in body["detail"]  # detail kept for support/logs
 
 
 def test_search_returns_category_and_offers(running_server):
