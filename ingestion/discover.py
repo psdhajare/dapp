@@ -61,14 +61,30 @@ def rank_urls(urls: list[str], card_name: str) -> list[str]:
 
 
 def find_doc_url(card_name: str, country: str = "") -> str:
-    """Best official-looking URL for the card's rewards/terms doc."""
-    q = f"{card_name} credit card rewards cashback terms"
-    if country:
-        q += f" {country}"
-    urls = search(q)
-    if not urls:
+    """Best official-looking URL for the card's rewards/terms doc.
+
+    Tries several query shapes (a single over-specified query often returns zero
+    results) and only fails if none do."""
+    c = f" {country}" if country else ""
+    queries = [
+        f"{card_name}{c}",
+        f"{card_name} credit card{c}",
+        f"{card_name} rewards terms fees{c}",
+        card_name,  # last resort: bare name, no country
+    ]
+    seen: list[str] = []
+    for q in queries:
+        try:
+            for u in search(q):
+                if u not in seen:
+                    seen.append(u)
+        except Exception:
+            continue
+        if len(seen) >= 5:
+            break
+    if not seen:
         raise LookupError(f"no search results for: {card_name}")
-    return rank_urls(urls, card_name)[0]
+    return rank_urls(seen, card_name)[0]
 
 
 class _TextExtractor(HTMLParser):
