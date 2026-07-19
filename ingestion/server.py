@@ -22,6 +22,7 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .cli import run_auto
+from .db import Database
 from .extract import Extraction
 from .llm import get_client
 from .merchant import find_merchant_offers, result_to_dict
@@ -65,6 +66,18 @@ def extraction_to_dict(e: Extraction) -> dict:
         "valuation": asdict(e.valuation) if e.valuation else None,
         "offers": [asdict(o) for o in e.offers],
         "warnings": e.warnings,
+    }
+
+
+def _payload_from_db(db, card_id: str) -> dict:
+    """Rebuild an /ingest card payload from what's stored in the DB."""
+    val = db.get_valuation(card_id)
+    return {
+        "card": asdict(db.get_card(card_id)),
+        "rules": [asdict(r) for r in db.get_rules(card_id)],
+        "valuation": asdict(val) if val else None,
+        "offers": [asdict(o) for o in db.get_offers(card_id)],
+        "warnings": [],
     }
 
 
@@ -139,10 +152,33 @@ class Handler(BaseHTTPRequestHandler):
         # NOTE: client-supplied 'url' is intentionally ignored here (SSRF guard);
         # the server always discovers the doc URL itself.
         card_name = sanitize_query(req.get("card"))
-        results = run_auto(card_name, DB_PATH, provider=None,
-                           country=self._optional_country(req))
-        # A product can be a bundle of >1 physical card (e.g. a dual-card set).
-        self._send(200, {"cards": [extraction_to_dict(e) for e in results]})
+        country = self._optional_country(req)
+        refresh = bool(req.get("refresh"))
+        key = card_name.lower() + "|" + country.lower()
+
+        db = Database(DB_PATH)
+        db.init_schema_if_needed()
+        try:
+            # Serve from the DB catalog if we've fetched this card before —
+            # avoids the web entirely (resilient to search blocking).
+            if not refresh:
+                ids = db.cache_get_ids(key)
+                if ids and all(db.get_card(i) for i in ids):
+                    self._send(200, {
+                        "cards": [_payload_from_db(db, i) for i in ids],
+                        "cached": True,
+                    })
+                    return
+            # Miss (or refresh) -> fetch from the web, which writes to the DB.
+            results = run_auto(card_name, DB_PATH, provider=None, country=country)
+            db.cache_put_ids(key, [e.card.id for e in results])
+            # A product can be a bundle of >1 physical card (dual-card set).
+            self._send(200, {
+                "cards": [extraction_to_dict(e) for e in results],
+                "cached": False,
+            })
+        finally:
+            db.close()
 
     def _handle_search(self):
         req = self._read_json()

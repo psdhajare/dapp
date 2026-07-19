@@ -443,7 +443,9 @@ class _RecommendTabState extends State<RecommendTab>
     final colors = {for (final c in all) c.id: (c.colorPrimary, c.colorSecondary)};
     for (final c in held) {
       try {
-        final cards = await ingest.ingest(c.name, country: widget.profile.country);
+        // Refresh must re-fetch from the web, not the server DB cache.
+        final cards = await ingest.ingest(c.name,
+            country: widget.profile.country, refresh: true);
         for (final data in cards) {
           final id = (data['card'] as Map)['id'];
           final existing = colors[id];

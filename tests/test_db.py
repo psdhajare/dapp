@@ -19,6 +19,20 @@ def test_upsert_and_read_card():
     assert db.get_card("amex") == card
 
 
+def test_ingest_cache_roundtrip_and_staleness():
+    db = Database()
+    db.init_schema_if_needed()
+    db.cache_put_ids("enbd duo|uae", ["a", "b"])
+    assert db.cache_get_ids("enbd duo|uae") == ["a", "b"]
+    assert db.cache_get_ids("missing") is None
+    # An entry older than 7 days is treated as absent (re-fetch).
+    db.conn.execute(
+        "INSERT INTO ingest_cache (query_key, card_ids, fetched_at) "
+        "VALUES ('old', 'x', datetime('now', '-8 days'))")
+    db.conn.commit()
+    assert db.cache_get_ids("old") is None
+
+
 def test_migrate_drops_network_check_constraint():
     # Old DB with a CHECK that only allowed visa/mastercard/amex/other.
     db = Database()

@@ -27,8 +27,9 @@ class IngestService {
   /// bundle of several). Each: {card, rules, valuation, offers, warnings}.
   /// [country] biases the web search to the user's market for accuracy.
   Future<List<Map<String, dynamic>>> ingest(String cardName,
-      {String country = ''}) async {
-    final body = await _post(endpoint, {'card': cardName, 'country': country});
+      {String country = '', bool refresh = false}) async {
+    final body = await _post(endpoint,
+        {'card': cardName, 'country': country, 'refresh': refresh});
     final cards = body['cards'] as List? ?? [body]; // tolerate legacy shape
     return cards.cast<Map<String, dynamic>>();
   }

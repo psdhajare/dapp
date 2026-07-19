@@ -29,6 +29,32 @@ class Database:
             self.init_schema()
         else:
             self._migrate()
+        # Persistent query -> card cache so a card is fetched from the web once,
+        # then served from the DB (resilient to search-engine blocking).
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS ingest_cache ("
+            "query_key TEXT PRIMARY KEY, card_ids TEXT NOT NULL, fetched_at TEXT)")
+        self.conn.commit()
+
+    def cache_get_ids(self, key: str, max_age_days: int = 7) -> list[str] | None:
+        """Cached card ids for [key], only if fetched within [max_age_days].
+        A stale entry returns None so the caller re-fetches fresh data."""
+        row = self.conn.execute(
+            "SELECT card_ids FROM ingest_cache WHERE query_key = ? "
+            "AND fetched_at > datetime('now', ?)",
+            (key, f"-{max_age_days} days"),
+        ).fetchone()
+        return row["card_ids"].split(",") if row and row["card_ids"] else None
+
+    def cache_put_ids(self, key: str, card_ids: list[str]) -> None:
+        self.conn.execute(
+            "INSERT INTO ingest_cache (query_key, card_ids, fetched_at) "
+            "VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(query_key) DO UPDATE SET "
+            "card_ids=excluded.card_ids, fetched_at=excluded.fetched_at",
+            (key, ",".join(card_ids)),
+        )
+        self.conn.commit()
 
     # Canonical cards columns (order matters for the copy during a rebuild).
     _CARD_COLUMNS = [
