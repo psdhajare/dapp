@@ -116,11 +116,24 @@ def _int(v) -> int | None:
 
 
 def extract_all(text: str, client: LLMClient, source_ref: str) -> list[Extraction]:
-    """Extract one or more cards. Multi-card products yield >1 Extraction."""
+    """Extract one or more cards. Multi-card products yield >1 Extraction.
+
+    Entries the model returns without a usable name/issuer are skipped; if none
+    are usable we raise LookupError (a wrong/vague name), which the server maps
+    to a clear 'card not found' rather than a generic error.
+    """
     raw = client.complete(SYSTEM_PROMPT, USER_TEMPLATE.format(text=text))
     data = _parse_json(raw)
     entries = data["cards"] if isinstance(data.get("cards"), list) else [data]
-    return [_extract_one(entry, source_ref) for entry in entries]
+    results: list[Extraction] = []
+    for entry in entries:
+        try:
+            results.append(_extract_one(entry, source_ref))
+        except (LookupError, ValueError):
+            continue  # malformed entry — skip
+    if not results:
+        raise LookupError("could not identify a card from the document")
+    return results
 
 
 def extract(text: str, client: LLMClient, source_ref: str) -> Extraction:
