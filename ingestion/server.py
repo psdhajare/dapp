@@ -155,8 +155,9 @@ class Handler(BaseHTTPRequestHandler):
         card_name = sanitize_query(req.get("card"))
         country = self._optional_country(req)
         refresh = bool(req.get("refresh"))
-        # Normalized so "ENBD Duo" and "Emirates NBD Duo Credit Card" share it.
-        key = card_key(card_name, country)
+        # Identity by card name only (country is a search hint, not identity):
+        # "ENBD Duo" and "Emirates NBD Duo Credit Card" share one entry.
+        key = card_key(card_name)
 
         db = Database(DB_PATH)
         db.init_schema_if_needed()

@@ -4,24 +4,21 @@ from ingestion.cardkey import card_key
 
 
 def test_alias_and_generic_words_collapse():
-    a = card_key("ENBD Duo", "UAE")
-    b = card_key("Emirates NBD Duo Credit Card", "uae")
-    assert a == b
+    assert card_key("ENBD Duo") == card_key("Emirates NBD Duo Credit Card")
 
 
 def test_distinct_tiers_stay_distinct():
-    assert card_key("Emirates NBD Platinum", "UAE") != \
-        card_key("Emirates NBD Titanium", "UAE")
+    assert card_key("Emirates NBD Platinum") != card_key("Emirates NBD Titanium")
 
 
-def test_country_is_part_of_key():
-    assert card_key("Wio Credit", "UAE") != card_key("Wio Credit", "India")
+def test_country_independent():
+    # A card's identity doesn't change with the user's country.
+    assert card_key("Apple Card") == card_key("apple card")
 
 
 def test_order_and_case_insensitive():
-    assert card_key("Duo emirates NBD", "AE") == card_key("EMIRATES nbd duo", "ae")
+    assert card_key("Duo emirates NBD") == card_key("EMIRATES nbd duo")
 
 
 def test_more_aliases():
-    assert card_key("ADCB Lulu Card", "UAE") == \
-        card_key("Abu Dhabi Commercial Bank Lulu", "UAE")
+    assert card_key("ADCB Lulu Card") == card_key("Abu Dhabi Commercial Bank Lulu")

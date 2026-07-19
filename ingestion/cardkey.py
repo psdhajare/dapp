@@ -1,6 +1,10 @@
-"""Normalize a card name + country into a stable cache key, so different
-spellings of the same card ("ENBD Duo", "Emirates NBD Duo Credit Card") map to
-the same catalog entry instead of re-fetching from the web each time.
+"""Normalize a card name into a stable catalog key, so different spellings of
+the same card ("ENBD Duo", "Emirates NBD Duo Credit Card") map to one entry
+instead of re-fetching from the web each time.
+
+Identity is issuer + product — NOT the user's country (a card is the same card
+wherever you hold it). Country is only a search hint elsewhere, not part of the
+key.
 """
 
 from __future__ import annotations
@@ -29,12 +33,12 @@ _STOP = {
 }
 
 
-def card_key(name: str, country: str = "") -> str:
+def card_key(name: str) -> str:
     """Stable key: alias-expanded, generic words dropped, distinctive tokens
-    sorted, plus the (normalized) country."""
+    sorted. Country-independent — the card is the same product everywhere."""
     s = name.lower()
     for alias, full in _ALIASES.items():
         s = re.sub(rf"\b{alias}\b", full, s)
     tokens = sorted(
         {w for w in re.split(r"[^a-z0-9]+", s) if w and w not in _STOP})
-    return " ".join(tokens) + "|" + country.lower().strip()
+    return " ".join(tokens)
