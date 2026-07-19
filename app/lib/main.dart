@@ -338,7 +338,9 @@ class _RecommendTabState extends State<RecommendTab>
   bool _searchLoading = false;
   List<MerchantOfferView>? _merchantOffers; // offers on the user's held cards
   List<MerchantOfferView> _otherOffers = const []; // non-held (secondary)
-  _Ranked? _offerWinner; // a held card with a %-offer at the merchant, if any
+  _Ranked? _offerWinner; // a held card with the best offer at the merchant
+  String? _offerHeadline; // deck headline for that offer ("1+1", "20%")
+  String? _offerCaption; // deck caption ("via The Entertainer", "at X")
   int _celebrateToken = 0; // bumped to fire the on-card celebration
   bool _celebrateBig = false; // big crackers vs a light sparkle
   final Set<int> _revealed = {}; // reveal ids already animated this result
@@ -520,32 +522,40 @@ class _RecommendTabState extends State<RecommendTab>
     // Non-held offers are kept separately and shown as muted secondary info.
     final walletOffers = deduped.where((o) => o.held).toList();
     final otherOffers = deduped.where((o) => !o.held).toList();
+
+    // Pick the highest-VALUE held offer to feature as the deck winner, so the
+    // top card is always the one that actually saves the most — a Buy-1-Get-1
+    // (~50%) beats a 5% category rate. Only feature it if it beats the best
+    // category rate for the card, else the normal ranking stands.
     _Ranked? offerWinner;
-    var bestPct = 0.0;
-    for (final o in rawOffers) {
-      final m = (o as Map).cast<String, dynamic>();
-      final hint = (m['card_hint'] as String?)?.trim();
-      if (hint == null || hint.isEmpty) continue;
-      final pct = _parsePercent('${m['title'] ?? ''} ${m['description'] ?? ''}');
-      if (pct == null || pct <= bestPct) continue;
-      final card = _matchHeldCard(hint, held);
+    String? offerHeadline;
+    String? offerCaption;
+    var bestValue = _result?.winner.rec.effectiveRate ?? 0.0;
+    for (final o in walletOffers) {
+      final value = (o.valuePct ?? 0) / 100;
+      if (value <= bestValue) continue; // must beat the best category rate
+      final card = _matchHeldCard(o.cardHint ?? '', held);
       if (card == null) continue;
-      bestPct = pct;
+      bestValue = value;
       offerWinner = _Ranked(
         card,
         Recommendation(
           cardId: card.id,
           categoryUsed: 'offer',
-          effectiveRate: pct / 100,
+          effectiveRate: value,
           hasCap: false,
         ),
       );
+      offerHeadline = o.shortLabel ?? '${(o.valuePct ?? 0).round()}%';
+      offerCaption = o.via != null ? 'via ${o.via}' : 'at $_searchMerchant';
     }
     if (mounted) {
       setState(() {
         _merchantOffers = walletOffers;
         _otherOffers = otherOffers;
         _offerWinner = offerWinner;
+        _offerHeadline = offerHeadline;
+        _offerCaption = offerCaption;
       });
       // Celebrate ONLY when the user's own card has an offer here — big.
       if (walletOffers.isNotEmpty) {
@@ -553,11 +563,6 @@ class _RecommendTabState extends State<RecommendTab>
         widget.analytics.log(Analytics.liveOfferViewed);
       }
     }
-  }
-
-  double? _parsePercent(String s) {
-    final m = RegExp(r'(\d+(?:\.\d+)?)\s*%').firstMatch(s);
-    return m == null ? null : double.tryParse(m.group(1)!);
   }
 
   CardInfo? _matchHeldCard(String hint, List<CardInfo> held) {
@@ -715,6 +720,8 @@ class _RecommendTabState extends State<RecommendTab>
       _merchantOffers = null;
       _otherOffers = const [];
       _offerWinner = null;
+      _offerHeadline = null;
+      _offerCaption = null;
     });
     try {
       final (lat, lng) = await widget.locationFn();
@@ -740,6 +747,8 @@ class _RecommendTabState extends State<RecommendTab>
       _merchantOffers = null;
       _otherOffers = const [];
       _offerWinner = null;
+      _offerHeadline = null;
+      _offerCaption = null;
     });
     try {
       await _recommend(category);
@@ -968,8 +977,9 @@ class _RecommendTabState extends State<RecommendTab>
                 child: _RankedDeck(
                   ranked: _deckRanked(r),
                   category: r.category,
-                  winnerCaption:
-                      _offerWinner != null ? 'at $_searchMerchant' : null,
+                  offerWinnerId: _offerWinner?.card.id,
+                  winnerHeadline: _offerHeadline,
+                  winnerCaption: _offerCaption,
                   celebrateToken: _celebrateToken,
                   celebrateBig: _celebrateBig,
                 ),
@@ -1484,12 +1494,16 @@ class _RankedDeck extends StatefulWidget {
   final List<_Ranked> ranked;
   final String category;
   final String? winnerCaption; // overrides "back on <category>" (e.g. offers)
+  final String? offerWinnerId; // card whose headline is the offer, not the rate
+  final String? winnerHeadline; // offer badge for that card, e.g. "1+1"
   final int celebrateToken; // bump to fire the on-card celebration once
   final bool celebrateBig; // big crackers vs a light sparkle
   const _RankedDeck(
       {required this.ranked,
       required this.category,
       this.winnerCaption,
+      this.offerWinnerId,
+      this.winnerHeadline,
       this.celebrateToken = 0,
       this.celebrateBig = false});
 
@@ -1565,13 +1579,22 @@ class _RankedDeckState extends State<_RankedDeck>
                     ? _CelebratableCard(
                         controller: _celebrate,
                         big: widget.celebrateBig,
-                        child: CardVisual(
-                          card: _order.first.card,
-                          headline:
-                              '${(_order.first.rec.effectiveRate * 100).toStringAsFixed(2)}%',
-                          caption: widget.winnerCaption ??
-                              'back on ${prettyCategory(widget.category)}',
-                        ),
+                        child: Builder(builder: (_) {
+                          final top = _order.first;
+                          // If the top card is the featured offer, show the
+                          // offer badge ("1+1") + its caption; else the rate.
+                          final isOffer = top.card.id == widget.offerWinnerId &&
+                              widget.winnerHeadline != null;
+                          return CardVisual(
+                            card: top.card,
+                            headline: isOffer
+                                ? widget.winnerHeadline!
+                                : '${(top.rec.effectiveRate * 100).toStringAsFixed(2)}%',
+                            caption: isOffer
+                                ? (widget.winnerCaption ?? '')
+                                : 'back on ${prettyCategory(widget.category)}',
+                          );
+                        }),
                       )
                     : GestureDetector(
                         onTap: () => _promote(i),
@@ -1869,6 +1892,8 @@ class MerchantOfferView {
   final String? cardHint;
   final String? validUntil;
   final String? via; // delivering program, e.g. "The Entertainer"
+  final double? valuePct; // LLM-estimated effective saving %
+  final String? shortLabel; // deck badge, e.g. "1+1", "30%"
   final bool held; // the offer's card is in the user's wallet
 
   const MerchantOfferView({
@@ -1877,6 +1902,8 @@ class MerchantOfferView {
     this.cardHint,
     this.validUntil,
     this.via,
+    this.valuePct,
+    this.shortLabel,
     this.held = false,
   });
 
@@ -1885,12 +1912,16 @@ class MerchantOfferView {
     final hint = (json['card_hint'] as String?)?.trim();
     final held = hint != null && hint.isNotEmpty && _matchesHeld(hint, heldNames);
     final via = (json['via'] as String?)?.trim();
+    final vp = json['value_pct'];
+    final label = (json['short_label'] as String?)?.trim();
     return MerchantOfferView(
       title: (json['title'] as String?)?.trim() ?? '',
       description: json['description'] as String?,
       cardHint: (hint != null && hint.isEmpty) ? null : hint,
       validUntil: json['valid_until'] as String?,
       via: (via != null && via.isEmpty) ? null : via,
+      valuePct: vp is num ? vp.toDouble() : null,
+      shortLabel: (label != null && label.isNotEmpty) ? label : null,
       held: held,
     );
   }

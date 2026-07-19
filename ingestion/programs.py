@@ -21,6 +21,8 @@ class Program:
     key: str
     name: str            # display name, shown as "via <name>"
     default_offer: str   # the program's standard benefit at any member merchant
+    value_pct: float     # effective saving of that benefit (buy-1-get-1 ≈ 50)
+    short_label: str     # deck badge, e.g. "1+1"
     # Domains whose readable pages authoritatively list member merchants.
     member_domains: tuple[str, ...]
 
@@ -30,6 +32,8 @@ PROGRAMS: dict[str, Program] = {
         key="entertainer",
         name="The Entertainer",
         default_offer="Buy 1 Get 1 free",
+        value_pct=50,
+        short_label="1+1",
         member_domains=("theentertainerme.com",),
     ),
     # Add more as cards are mapped, e.g. smiles, visa_offers, mastercard.
