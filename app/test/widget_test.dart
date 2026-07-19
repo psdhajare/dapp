@@ -259,7 +259,7 @@ void main() {
     expect(find.textContaining('Prasad'), findsOneWidget);
   });
 
-  testWidgets('removing a card via ✕ changes the recommendation',
+  testWidgets('swiping a card away changes the recommendation',
       (tester) async {
     await tester.pumpWidget(await buildApp());
 
@@ -270,9 +270,11 @@ void main() {
     await tester.tap(find.byKey(const Key('wallet_button')));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const Key('remove_amex_gold')));
+    // Swipe reveals the Remove action (card does NOT fully dismiss), then tap it.
+    await tester.drag(find.byKey(const Key('card_amex_gold')),
+        const Offset(-260, 0));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('confirm_remove')));
+    await tester.tap(find.byKey(const Key('remove_amex_gold')));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Best card'));

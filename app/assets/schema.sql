@@ -16,14 +16,18 @@ INSERT INTO categories (name) VALUES
     ('general');
 
 CREATE TABLE cards (
-    id              TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    issuer          TEXT NOT NULL,
-    network         TEXT NOT NULL CHECK (network IN ('visa', 'mastercard', 'amex', 'other')),
-    currency        TEXT NOT NULL DEFAULT 'GBP',
-    annual_fee      REAL NOT NULL DEFAULT 0,
-    color_primary   TEXT,  -- '#RRGGBB' of the physical card design, if known
-    color_secondary TEXT
+    id                 TEXT PRIMARY KEY,
+    name               TEXT NOT NULL,
+    issuer             TEXT NOT NULL,
+    network            TEXT NOT NULL CHECK (network IN ('visa', 'mastercard', 'amex', 'other')),
+    currency           TEXT NOT NULL DEFAULT 'GBP',
+    annual_fee         REAL NOT NULL DEFAULT 0,
+    apr                REAL,     -- annual percentage rate on balances (%)
+    foreign_tx_fee     REAL,     -- % fee on foreign-currency spend
+    min_salary         REAL,     -- monthly income requirement
+    interest_free_days INTEGER,  -- grace period on purchases
+    color_primary      TEXT,  -- '#RRGGBB' of the physical card design, if known
+    color_secondary    TEXT
 );
 
 -- Reward rate for a card in a category. Cap fields stored always; enforcement

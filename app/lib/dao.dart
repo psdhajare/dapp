@@ -44,6 +44,46 @@ class OfferInfo {
   });
 }
 
+class RuleInfo {
+  final String category;
+  final double rate;
+  final String unit; // cashback_pct | points_per_unit
+  final double? capAmount;
+  final String capPeriod;
+  final double? minSpend;
+  final String? conditions;
+  const RuleInfo({
+    required this.category,
+    required this.rate,
+    required this.unit,
+    this.capAmount,
+    required this.capPeriod,
+    this.minSpend,
+    this.conditions,
+  });
+}
+
+class CardDetails {
+  final String currency;
+  final double annualFee;
+  final String network;
+  final double? apr;
+  final double? foreignTxFee;
+  final double? minSalary;
+  final int? interestFreeDays;
+  final List<RuleInfo> rules;
+  const CardDetails({
+    required this.currency,
+    required this.annualFee,
+    required this.network,
+    this.apr,
+    this.foreignTxFee,
+    this.minSalary,
+    this.interestFreeDays,
+    required this.rules,
+  });
+}
+
 class CardDao {
   final Database db;
   CardDao(this.db);
@@ -117,6 +157,41 @@ class CardDao {
     return '${rows.first['issuer']} · ${rows.first['name']}';
   }
 
+  /// Full details for the card info sheet: fee, currency, network, reward rules.
+  Future<CardDetails> cardDetails(String cardId) async {
+    final c = await db.query('cards',
+        columns: ['currency', 'annual_fee', 'network', 'apr',
+          'foreign_tx_fee', 'min_salary', 'interest_free_days'],
+        where: 'id = ?', whereArgs: [cardId]);
+    final ruleRows = await db.query('reward_rules',
+        columns: ['category', 'rate', 'unit', 'cap_amount', 'cap_period',
+          'min_spend', 'conditions'],
+        where: 'card_id = ?', whereArgs: [cardId],
+        orderBy: 'rate DESC');
+    final row = c.isEmpty ? const {} : c.first;
+    return CardDetails(
+      currency: (row['currency'] as String?) ?? 'AED',
+      annualFee: (row['annual_fee'] as num?)?.toDouble() ?? 0,
+      network: (row['network'] as String?) ?? 'other',
+      apr: (row['apr'] as num?)?.toDouble(),
+      foreignTxFee: (row['foreign_tx_fee'] as num?)?.toDouble(),
+      minSalary: (row['min_salary'] as num?)?.toDouble(),
+      interestFreeDays: (row['interest_free_days'] as num?)?.toInt(),
+      rules: [
+        for (final r in ruleRows)
+          RuleInfo(
+            category: r['category'] as String,
+            rate: (r['rate'] as num).toDouble(),
+            unit: r['unit'] as String,
+            capAmount: (r['cap_amount'] as num?)?.toDouble(),
+            capPeriod: r['cap_period'] as String? ?? 'none',
+            minSpend: (r['min_spend'] as num?)?.toDouble(),
+            conditions: r['conditions'] as String?,
+          ),
+      ],
+    );
+  }
+
   /// Every card in the DB with whether it's in the wallet.
   Future<List<CardInfo>> allCards() async {
     final rows = await db.rawQuery('''
@@ -167,6 +242,10 @@ class CardDao {
         'network': card['network'],
         'currency': card['currency'] ?? 'GBP',
         'annual_fee': card['annual_fee'] ?? 0,
+        'apr': card['apr'],
+        'foreign_tx_fee': card['foreign_tx_fee'],
+        'min_salary': card['min_salary'],
+        'interest_free_days': card['interest_free_days'],
         // User-picked gradient wins over anything the server guessed.
         'color_primary': colorPrimary ?? card['color_primary'],
         'color_secondary': colorSecondary ?? card['color_secondary'],

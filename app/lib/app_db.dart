@@ -7,7 +7,7 @@ import 'package:sqflite_common/sqlite_api.dart';
 
 /// Bump whenever bundled schema/seed data changes: existing installs drop and
 /// rebuild their local copy on next launch.
-const _dbVersion = 10;
+const _dbVersion = 11;
 
 Future<Database> openAppDb(DatabaseFactory factory) async {
   return factory.openDatabase(

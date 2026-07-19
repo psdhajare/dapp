@@ -9,6 +9,12 @@ from ingestion.cli import run_auto
 from ingestion.db import Database
 from tests.test_extract import FakeLLM
 
+
+@pytest.fixture(autouse=True)
+def _no_fees_search(monkeypatch):
+    # run_auto also searches for a rates/fees page; keep tests offline.
+    monkeypatch.setattr(discover, "search", lambda q: [])
+
 DUO = json.dumps({
     "card": {"id": "enbd_duo", "name": "Emirates NBD Duo", "issuer": "Emirates NBD",
              "network": "mastercard", "currency": "AED", "annual_fee": 0},

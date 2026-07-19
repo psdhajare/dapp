@@ -39,14 +39,14 @@ class CardVisual extends StatelessWidget {
   final CardInfo card;
   final String? headline; // e.g. "5.00%"
   final String? caption; // e.g. "back on dining"
-  final VoidCallback? onRemove;
+  final VoidCallback? onInfo; // tapping the (i) shows card details
 
   const CardVisual({
     super.key,
     required this.card,
     this.headline,
     this.caption,
-    this.onRemove,
+    this.onInfo,
   });
 
   @override
@@ -108,11 +108,11 @@ class CardVisual extends StatelessWidget {
                             color: inkSoft)),
                   ),
                   _Contactless(color: inkFaint),
-                  if (onRemove != null) ...[
+                  if (onInfo != null) ...[
                     const SizedBox(width: 8),
                     GestureDetector(
-                      key: Key('remove_${card.id}'),
-                      onTap: onRemove,
+                      key: Key('info_${card.id}'),
+                      onTap: onInfo,
                       child: Container(
                         width: 26,
                         height: 26,
@@ -121,7 +121,7 @@ class CardVisual extends StatelessWidget {
                           color: ink.withValues(alpha: 0.18),
                           shape: BoxShape.circle,
                         ),
-                        child: Icon(Icons.close, size: 15, color: ink),
+                        child: Icon(Icons.info_outline, size: 15, color: ink),
                       ),
                     ),
                   ],

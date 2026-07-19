@@ -42,13 +42,18 @@ class Database:
         self.conn.execute(
             """INSERT INTO cards
                  (id, name, issuer, network, currency, annual_fee,
+                  apr, foreign_tx_fee, min_salary, interest_free_days,
                   color_primary, color_secondary)
                VALUES
                  (:id, :name, :issuer, :network, :currency, :annual_fee,
+                  :apr, :foreign_tx_fee, :min_salary, :interest_free_days,
                   :color_primary, :color_secondary)
                ON CONFLICT(id) DO UPDATE SET
                  name=excluded.name, issuer=excluded.issuer, network=excluded.network,
                  currency=excluded.currency, annual_fee=excluded.annual_fee,
+                 apr=excluded.apr, foreign_tx_fee=excluded.foreign_tx_fee,
+                 min_salary=excluded.min_salary,
+                 interest_free_days=excluded.interest_free_days,
                  color_primary=excluded.color_primary,
                  color_secondary=excluded.color_secondary""",
             card.__dict__,

@@ -27,14 +27,64 @@ def run(path: str, db_path: str, provider: str | None,
 
 def run_auto(card_name: str, db_path: str, provider: str | None,
              client=None, url: str | None = None) -> list[Extraction]:
-    """Whole flow: card name -> find official doc -> fetch -> extract -> DB."""
+    """Whole flow: card name -> find official doc -> fetch -> extract -> DB.
+
+    Also pulls a fees/rates page, since APR, annual fee and income requirements
+    usually live there rather than on the marketing page — key facts the user
+    must see, so it's worth the extra fetch.
+    """
     url = url or discover.find_doc_url(card_name)
     print(f"Doc: {url}")
     text = discover.fetch_text(url)
     if not text.strip():
         raise ValueError(f"empty document at {url}")
-    return _ingest(text, source_ref=url, db_path=db_path,
-                   provider=provider, client=client)
+    # Keep room for the rates text so it isn't truncated away.
+    text = text[:26000] + "\n\n" + _fees_text(card_name)
+    return _ingest(text[:discover.MAX_DOC_CHARS], source_ref=url,
+                   db_path=db_path, provider=provider, client=client)
+
+
+# Signals a page actually carries the rate/fee facts we need.
+_RATE_HINTS = ("apr", "interest rate", "profit rate", "per month", "monthly rate",
+               "% p.a", "annual percentage", "schedule of charges", "key facts")
+
+
+def _fees_text(card_name: str, limit: int = 14000) -> str:
+    """Best-effort text of the card's rate/fee pages (APR, fees, salary).
+
+    APR usually lives on a 'Key Facts Statement' or 'Schedule of Charges' page
+    (often a PDF), quoted as a monthly/profit rate — so we search several angles
+    and combine the readable rate-bearing pages. Worth the extra fetches: these
+    are facts the user must see, and add-card is infrequent.
+    """
+    queries = (
+        f"{card_name} key facts statement",
+        f"{card_name} schedule of charges interest rate",
+        f"{card_name} monthly interest profit rate fees",
+    )
+    seen: list[str] = []
+    for q in queries:
+        try:
+            for u in discover.search(q):
+                if u not in seen:
+                    seen.append(u)
+        except Exception:
+            continue
+    parts: list[str] = []
+    total = 0
+    for u in seen[:8]:
+        try:
+            t = discover.fetch_text(u, timeout=15)
+        except Exception:
+            continue
+        if not any(h in t.lower() for h in _RATE_HINTS):
+            continue
+        chunk = t[:6000]
+        parts.append(chunk)
+        total += len(chunk)
+        if total >= limit:
+            break
+    return "\n\n".join(parts)[:limit]
 
 
 def _ingest(text: str, source_ref: str, db_path: str,

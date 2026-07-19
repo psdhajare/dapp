@@ -25,6 +25,12 @@ class Card:
     network: str
     currency: str = "GBP"
     annual_fee: float = 0.0
+    # Key cost facts the user must see. APR is the ANNUAL percentage rate on
+    # revolving balances (UAE cards often quote a monthly rate — APR = ×12).
+    apr: float | None = None
+    foreign_tx_fee: float | None = None  # % on non-currency spend
+    min_salary: float | None = None      # monthly income requirement
+    interest_free_days: int | None = None
     color_primary: str | None = None
     color_secondary: str | None = None
 
@@ -33,6 +39,8 @@ class Card:
             raise ValueError("card id, name, issuer are required")
         if self.network not in VALID_NETWORKS:
             raise ValueError(f"invalid network: {self.network}")
+        if self.apr is not None and not (0 <= self.apr <= 100):
+            raise ValueError(f"apr out of range: {self.apr}")
         for c in (self.color_primary, self.color_secondary):
             if c is not None and not _HEX_RE.match(c):
                 raise ValueError(f"invalid color hex: {c}")

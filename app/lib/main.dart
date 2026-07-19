@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:engine/engine.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'analytics.dart';
@@ -213,22 +214,47 @@ class _BlurNav extends StatelessWidget {
           ),
           // Symmetric 10px above/below the icon+label; home indicator sits below.
           padding: EdgeInsets.only(top: 10, bottom: 10 + bottom),
-          child: Row(
+          child: Stack(
+            clipBehavior: Clip.none,
             children: [
-              _NavItem(
-                icon: Icons.style_outlined,
-                selectedIcon: Icons.style,
-                label: 'Best card',
-                selected: tab == 0,
-                onTap: () => onSelect(0),
+              Row(
+                children: [
+                  _NavItem(
+                    icon: Icons.style_outlined,
+                    selectedIcon: Icons.style,
+                    label: 'Best card',
+                    selected: tab == 0,
+                    onTap: () => onSelect(0),
+                  ),
+                  _NavItem(
+                    buttonKey: const Key('wallet_button'),
+                    icon: Icons.account_balance_wallet_outlined,
+                    selectedIcon: Icons.account_balance_wallet,
+                    label: 'Wallet',
+                    selected: tab == 1,
+                    onTap: () => onSelect(1),
+                  ),
+                ],
               ),
-              _NavItem(
-                buttonKey: const Key('wallet_button'),
-                icon: Icons.account_balance_wallet_outlined,
-                selectedIcon: Icons.account_balance_wallet,
-                label: 'Wallet',
-                selected: tab == 1,
-                onTap: () => onSelect(1),
+              // Accent segment on the top boundary above the ACTIVE tab.
+              Positioned(
+                top: -10, // sit on the panel's top edge (cancels the 10 padding)
+                left: 0,
+                right: 0,
+                child: Row(
+                  children: [
+                    for (var i = 0; i < 2; i++)
+                      Expanded(
+                        child: AnimatedContainer(
+                          duration: ConciergeMotion.chip,
+                          height: 2.5,
+                          color: tab == i
+                              ? scheme.primary
+                              : Colors.transparent,
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -266,23 +292,7 @@ class _NavItem extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Selected icon sits in an accent-bordered pill; unselected keeps
-            // the same footprint (transparent border) so nothing shifts.
-            AnimatedContainer(
-              duration: ConciergeMotion.chip,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              decoration: BoxDecoration(
-                color: selected
-                    ? scheme.primary.withValues(alpha: 0.10)
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(
-                  color: selected ? scheme.primary : Colors.transparent,
-                  width: 1.5,
-                ),
-              ),
-              child: Icon(selected ? selectedIcon : icon, size: 24, color: color),
-            ),
+            Icon(selected ? selectedIcon : icon, size: 26, color: color),
             const SizedBox(height: 3),
             Text(label,
                 style: Theme.of(context)
@@ -1269,6 +1279,169 @@ class _OtherCardsOffersState extends State<_OtherCardsOffers> {
   }
 }
 
+/// Card info sheet: network, annual fee, and the reward rules.
+class _CardInfoSheet extends StatelessWidget {
+  final CardInfo card;
+  final CardDetails details;
+  const _CardInfoSheet({required this.card, required this.details});
+
+  String _network(String n) => switch (n) {
+        'mastercard' => 'Mastercard',
+        'visa' => 'Visa',
+        'amex' => 'American Express',
+        _ => 'Card',
+      };
+
+  String _rateLabel(RuleInfo r) => r.unit == 'points_per_unit'
+      ? '${r.rate.toStringAsFixed(r.rate == r.rate.roundToDouble() ? 0 : 2)} pts / ${details.currency}'
+      : '${r.rate.toStringAsFixed(r.rate == r.rate.roundToDouble() ? 0 : 2)}%';
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final scheme = t.colorScheme;
+    final cur = details.currency;
+    final facts = <(String, String)>[
+      (
+        'APR (interest)',
+        details.apr != null ? '${details.apr!.toStringAsFixed(2)}% / year' : '—',
+      ),
+      (
+        'Annual fee',
+        details.annualFee <= 0
+            ? 'None'
+            : '$cur ${details.annualFee.toStringAsFixed(0)}',
+      ),
+      if (details.foreignTxFee != null)
+        ('Foreign spend fee', '${details.foreignTxFee!.toStringAsFixed(2)}%'),
+      if (details.minSalary != null)
+        ('Min. monthly salary', '$cur ${details.minSalary!.toStringAsFixed(0)}'),
+      if (details.interestFreeDays != null)
+        ('Interest-free days', '${details.interestFreeDays} days'),
+      ('Network', _network(details.network)),
+    ];
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+            20, 14, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                    color: scheme.outline,
+                    borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(displayIssuer(card.issuer).toUpperCase(),
+                style: t.textTheme.labelSmall),
+            const SizedBox(height: 2),
+            Text(card.name, style: t.textTheme.displaySmall),
+            const SizedBox(height: 20),
+            Text('KEY FACTS', style: t.textTheme.labelSmall),
+            const SizedBox(height: 8),
+            for (final (label, value) in facts)
+              _FactRow(label: label, value: value, emphasize: label.startsWith('APR')),
+            const SizedBox(height: 20),
+            Text('REWARDS', style: t.textTheme.labelSmall),
+            const SizedBox(height: 8),
+            if (details.rules.isEmpty)
+              Text('No reward rules on record for this card.',
+                  style: t.textTheme.bodyMedium
+                      ?.copyWith(color: scheme.onSurfaceVariant))
+            else
+              for (final r in details.rules) _RuleRow(rate: _rateLabel(r), rule: r),
+            const SizedBox(height: 16),
+            Text(
+              'APR and full terms are in your card agreement.',
+              style: t.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant.withValues(alpha: 0.8)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FactRow extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool emphasize;
+  const _FactRow(
+      {required this.label, required this.value, this.emphasize = false});
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final scheme = t.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: t.textTheme.bodyMedium
+                  ?.copyWith(color: scheme.onSurfaceVariant)),
+          Text(value,
+              style: (emphasize ? t.textTheme.titleMedium : t.textTheme.titleSmall)
+                  ?.copyWith(
+                      color: emphasize ? scheme.primary : scheme.onSurface,
+                      fontWeight: FontWeight.w600)),
+        ],
+      ),
+    );
+  }
+}
+
+class _RuleRow extends StatelessWidget {
+  final String rate;
+  final RuleInfo rule;
+  const _RuleRow({required this.rate, required this.rule});
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final scheme = t.colorScheme;
+    final subs = <String>[
+      if (rule.capAmount != null)
+        'up to ${rule.capAmount!.toStringAsFixed(0)} / ${rule.capPeriod}',
+      if (rule.minSpend != null)
+        'min spend ${rule.minSpend!.toStringAsFixed(0)}',
+      if (rule.conditions != null && rule.conditions!.isNotEmpty) rule.conditions!,
+    ];
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(prettyCategory(rule.category),
+                    style: t.textTheme.titleSmall),
+                if (subs.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(subs.join(' · '),
+                      style: t.textTheme.bodySmall
+                          ?.copyWith(color: scheme.onSurfaceVariant)),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(rate,
+              style: t.textTheme.titleSmall?.copyWith(color: scheme.primary)),
+        ],
+      ),
+    );
+  }
+}
+
 /// Never show the internal token "general" — say "everyday spend" (v1.1 copy).
 String prettyCategory(String c) => c == 'general' ? 'everyday spend' : c;
 
@@ -2221,8 +2394,9 @@ class _WalletTabState extends State<WalletTab> {
   }
 
   Future<void> _remove(CardInfo card) async {
+    // Drop from the visible list first so a swipe-dismissed card isn't rebuilt.
+    setState(() => _held = [...?_held]..removeWhere((x) => x.id == card.id));
     await widget.dao.setHeld(card.id, false);
-    await _load();
     widget.onWalletChanged?.call();
     if (mounted) {
       final messenger = ScaffoldMessenger.of(context);
@@ -2249,48 +2423,15 @@ class _WalletTabState extends State<WalletTab> {
     }
   }
 
-  Future<void> _confirmRemove(CardInfo card) async {
-    final scheme = Theme.of(context).colorScheme;
-    final t = Theme.of(context);
-    final confirmed = await showModalBottomSheet<bool>(
+  /// Card info sheet: fee, network, and the reward rules (what it earns where).
+  Future<void> _showCardInfo(CardInfo card) async {
+    final details = await widget.dao.cardDetails(card.id);
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
       context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 14),
-            Container(
-              width: 36,
-              height: 4,
-              decoration: BoxDecoration(
-                  color: scheme.outline,
-                  borderRadius: BorderRadius.circular(2)),
-            ),
-            const SizedBox(height: 16),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Text(card.label.toUpperCase(),
-                  textAlign: TextAlign.center, style: t.textTheme.labelSmall),
-            ),
-            const SizedBox(height: 8),
-            ListTile(
-              key: const Key('confirm_remove'),
-              leading: Icon(Icons.delete_outline, color: scheme.error),
-              title: Text('Remove from wallet',
-                  style: t.textTheme.titleSmall?.copyWith(color: scheme.error)),
-              onTap: () => Navigator.of(ctx).pop(true),
-            ),
-            ListTile(
-              leading: Icon(Icons.close, color: scheme.onSurfaceVariant),
-              title: Text('Cancel', style: t.textTheme.titleSmall),
-              onTap: () => Navigator.of(ctx).pop(false),
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
+      isScrollControlled: true,
+      builder: (_) => _CardInfoSheet(card: card, details: details),
     );
-    if (confirmed == true) await _remove(card);
   }
 
   Future<void> _openAddSheet() async {
@@ -2321,6 +2462,7 @@ class _WalletTabState extends State<WalletTab> {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
+    final scheme = t.colorScheme;
     final held = _held;
     return Stack(
       children: [
@@ -2336,8 +2478,31 @@ class _WalletTabState extends State<WalletTab> {
                       for (final c in held)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 14),
-                          child: CardVisual(
-                              card: c, onRemove: () => _confirmRemove(c)),
+                          // Swipe left reveals a Remove action; the card stops
+                          // partway (no full-swipe) so nothing deletes by
+                          // accident — the user must tap Remove.
+                          child: Slidable(
+                            key: ValueKey('card_${c.id}'),
+                            groupTag: 'wallet',
+                            endActionPane: ActionPane(
+                              motion: const DrawerMotion(),
+                              extentRatio: 0.30,
+                              children: [
+                                SlidableAction(
+                                  key: Key('remove_${c.id}'),
+                                  onPressed: (_) => _remove(c),
+                                  backgroundColor: scheme.errorContainer,
+                                  foregroundColor: scheme.onErrorContainer,
+                                  icon: Icons.delete_outline,
+                                  label: 'Remove',
+                                  borderRadius:
+                                      BorderRadius.circular(kCardRadius),
+                                ),
+                              ],
+                            ),
+                            child: CardVisual(
+                                card: c, onInfo: () => _showCardInfo(c)),
+                          ),
                         ),
                     ],
                   ),

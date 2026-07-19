@@ -31,7 +31,16 @@ SYSTEM_PROMPT = (
     "per unit spent' schemes. cap_period is one of none, monthly, quarterly, "
     "yearly. Also collect non-rate benefits (e.g. buy-1-get-1 cinema tickets, "
     "free airport lounge, valet parking) as offers with the closest matching "
-    "category or null. For color_primary/color_secondary give the physical "
+    "category or null. "
+    "Extract the card's key cost facts when present: apr = the ANNUAL percentage "
+    "rate on outstanding balances as a number. Banks often quote a MONTHLY rate "
+    "or (for Islamic cards) a 'profit rate' — multiply a monthly figure by 12 to "
+    "get apr (e.g. 3.25% per month -> apr 39; 3.09%/month profit rate -> apr 37). "
+    "If only an annual %/p.a. is given, use it directly. foreign_tx_fee = percent "
+    "fee on foreign-currency spend; min_salary = monthly income requirement; "
+    "interest_free_days = grace period on purchases. Use null for any you can't "
+    "find — never guess these numbers. "
+    "For color_primary/color_secondary give the physical "
     "card's design colors as hex — from the document or from your knowledge "
     "of this specific card's look; null if you don't know it. "
     "If the product is a bundle of MULTIPLE distinct physical cards with "
@@ -48,6 +57,8 @@ Return JSON with this shape:
   "card": {{"id": str, "name": str, "issuer": str,
             "network": "visa|mastercard|amex|other",
             "currency": str, "annual_fee": number,
+            "apr": number|null, "foreign_tx_fee": number|null,
+            "min_salary": number|null, "interest_free_days": number|null,
             "color_primary": "#RRGGBB"|null, "color_secondary": "#RRGGBB"|null}},
   "rules": [{{"category": str, "rate": number, "unit": str,
               "cap_amount": number|null, "cap_period": str,
@@ -79,6 +90,25 @@ def _slug(*parts: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", " ".join(parts).lower()).strip("_")
 
 
+_CARD_FIELDS = set(Card.__dataclass_fields__)
+
+
+def _num(v) -> float | None:
+    """A float from an LLM value like 39, '39%', '39.0 percent'; else None."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        m = re.search(r"-?\d+(?:\.\d+)?", v)
+        if m:
+            return float(m.group())
+    return None
+
+
+def _int(v) -> int | None:
+    n = _num(v)
+    return int(n) if n is not None else None
+
+
 def extract_all(text: str, client: LLMClient, source_ref: str) -> list[Extraction]:
     """Extract one or more cards. Multi-card products yield >1 Extraction."""
     raw = client.complete(SYSTEM_PROMPT, USER_TEMPLATE.format(text=text))
@@ -106,6 +136,12 @@ def _extract_one(data: dict, source_ref: str) -> Extraction:
             card_data[key] = f"#{c}"  # tolerate missing '#'
         elif c and not re.match(r"^#[0-9a-fA-F]{6}$", c):
             card_data[key] = None  # drop junk instead of failing the run
+    # Coerce cost facts to numbers; drop anything unparseable rather than fail.
+    for key in ("apr", "foreign_tx_fee", "min_salary"):
+        card_data[key] = _num(card_data.get(key))
+    card_data["interest_free_days"] = _int(card_data.get("interest_free_days"))
+    # Ignore any keys the model added that aren't Card fields.
+    card_data = {k: v for k, v in card_data.items() if k in _CARD_FIELDS}
     card = Card(**card_data)
     card.validate()
 

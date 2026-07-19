@@ -41,6 +41,21 @@ def test_extract_parses_and_validates():
     assert llm.calls, "LLM was called"
 
 
+def test_extract_captures_cost_facts_and_coerces():
+    data = json.dumps({
+        "card": {"id": "c", "name": "C", "issuer": "Bank", "network": "visa",
+                 "currency": "AED", "annual_fee": 0,
+                 "apr": "39%", "foreign_tx_fee": 2.99,
+                 "min_salary": "5000", "interest_free_days": 55},
+        "rules": [], "points_valuation": None,
+    })
+    card = extract("doc", FakeLLM(data), source_ref="x").card
+    assert card.apr == 39.0            # "39%" -> 39.0
+    assert card.foreign_tx_fee == 2.99
+    assert card.min_salary == 5000.0
+    assert card.interest_free_days == 55
+
+
 def test_extract_rejects_malformed_json():
     with pytest.raises(ValueError):
         extract("doc", FakeLLM("not json"), source_ref="x")
