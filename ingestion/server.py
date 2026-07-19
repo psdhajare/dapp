@@ -21,6 +21,7 @@ import traceback
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .cardkey import card_key
 from .cli import run_auto
 from .db import Database
 from .extract import Extraction
@@ -154,7 +155,8 @@ class Handler(BaseHTTPRequestHandler):
         card_name = sanitize_query(req.get("card"))
         country = self._optional_country(req)
         refresh = bool(req.get("refresh"))
-        key = card_name.lower() + "|" + country.lower()
+        # Normalized so "ENBD Duo" and "Emirates NBD Duo Credit Card" share it.
+        key = card_key(card_name, country)
 
         db = Database(DB_PATH)
         db.init_schema_if_needed()
