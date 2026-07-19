@@ -26,6 +26,23 @@ MAX_DOC_CHARS = 40_000
 _NOISE_WORDS = {"credit", "card", "cashback", "cash", "back", "rewards", "the", "bank"}
 
 
+def _searxng(query: str) -> list[str] | None:
+    """Self-hosted SearXNG metasearch (free, no key, aggregates engines).
+    Set SEARXNG_URL (e.g. http://localhost:8888) to enable. SearXNG must have
+    the JSON format enabled (search.formats: [html, json] in settings.yml)."""
+    base = os.environ.get("SEARXNG_URL")
+    if not base:
+        return None
+    resp = requests.get(
+        base.rstrip("/") + "/search",
+        params={"q": query, "format": "json"},
+        headers=HEADERS,
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return [r["url"] for r in resp.json().get("results", []) if r.get("url")]
+
+
 def _brave(query: str) -> list[str] | None:
     """Brave Search API — reliable from a server IP. Free tier ~2000/mo.
     Set BRAVE_API_KEY to enable. Returns None (skip) when not configured."""
@@ -92,7 +109,7 @@ def _mojeek(query: str) -> list[str]:
 
 # Tried in order; first engine that returns results wins. Keyed APIs (reliable
 # from a server IP) go first when configured; keyless scrapers are the fallback.
-_ENGINES = (_brave, _serper, _ddg, _bing, _mojeek)
+_ENGINES = (_searxng, _brave, _serper, _ddg, _bing, _mojeek)
 
 
 def search(query: str, limit: int = 10) -> list[str]:
