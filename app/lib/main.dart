@@ -19,6 +19,7 @@ import 'rate_limiter.dart';
 import 'screens/profile_screen.dart';
 import 'share_service.dart';
 import 'theme/concierge_theme.dart';
+import 'util/card_match.dart';
 import 'util/formatting.dart';
 import 'util/gradients.dart';
 import 'util/offer_dedupe.dart';
@@ -335,9 +336,11 @@ class _RecommendTabState extends State<RecommendTab>
   final _historyOverlay = OverlayPortalController();
   String? _searchMerchant; // the queried merchant, when in search mode
   bool _searchLoading = false;
-  List<MerchantOfferView>? _merchantOffers;
+  List<MerchantOfferView>? _merchantOffers; // offers on the user's held cards
+  List<MerchantOfferView> _otherOffers = const []; // non-held (secondary)
   _Ranked? _offerWinner; // a held card with a %-offer at the merchant, if any
-  int _celebrateToken = 0; // bumped to fire the on-card crackers
+  int _celebrateToken = 0; // bumped to fire the on-card celebration
+  bool _celebrateBig = false; // big crackers vs a light sparkle
   final Set<int> _revealed = {}; // reveal ids already animated this result
 
   @override
@@ -441,11 +444,13 @@ class _RecommendTabState extends State<RecommendTab>
       _selected = 'search';
       _searchMerchant = merchant;
       _merchantOffers = null;
+      _otherOffers = const [];
       _loading = true;
     });
     // Instant best-card from the offline keyword category.
     await _recommend(categoryForMerchant(merchant));
     setState(() => _loading = false);
+    _celebrate(_result?.winner.rec.effectiveRate ?? 0, live: false);
 
     final key = merchant.toLowerCase();
 
@@ -466,7 +471,13 @@ class _RecommendTabState extends State<RecommendTab>
     if (ingest == null) return;
     setState(() => _searchLoading = true);
     try {
-      final data = await ingest.search(merchant);
+      // Send held card names so the backend can target loyalty-program offers
+      // (e.g. Wio → Entertainer). Not persisted server-side.
+      final held = (await widget.dao.allCards())
+          .where((c) => c.held)
+          .map((c) => '${displayIssuer(c.issuer)} ${c.name}'.trim())
+          .toList();
+      final data = await ingest.search(merchant, cards: held);
       // Cache a real hit for a day; a miss only briefly so it retries soon and
       // a genuine offer is never hidden for long.
       final hasOffers = (data['offers'] as List?)?.isNotEmpty ?? false;
@@ -502,11 +513,13 @@ class _RecommendTabState extends State<RecommendTab>
       for (final o in rawOffers)
         MerchantOfferView.fromJson((o as Map).cast<String, dynamic>(), heldNames),
     ];
-    // Most relevant first: offers on cards the user actually holds lead the list.
-    offers.sort((a, b) => (b.held ? 1 : 0).compareTo(a.held ? 1 : 0));
     // Drop near-duplicate offers (same deal, different merchant phrasing).
-    final dedupedOffers =
+    final deduped =
         dedupeByText(offers, (o) => '${o.title} ${o.description ?? ''}');
+    // Wallet-first: an offer only matters if it's on a card the user holds.
+    // Non-held offers are kept separately and shown as muted secondary info.
+    final walletOffers = deduped.where((o) => o.held).toList();
+    final otherOffers = deduped.where((o) => !o.held).toList();
     _Ranked? offerWinner;
     var bestPct = 0.0;
     for (final o in rawOffers) {
@@ -530,13 +543,14 @@ class _RecommendTabState extends State<RecommendTab>
     }
     if (mounted) {
       setState(() {
-        _merchantOffers = dedupedOffers;
+        _merchantOffers = walletOffers;
+        _otherOffers = otherOffers;
         _offerWinner = offerWinner;
-        if (dedupedOffers.isNotEmpty) _celebrateToken++; // fire crackers
       });
-      if (dedupedOffers.isNotEmpty) {
+      // Celebrate ONLY when the user's own card has an offer here — big.
+      if (walletOffers.isNotEmpty) {
+        _celebrate(offerWinner?.rec.effectiveRate ?? 0.10, live: true);
         widget.analytics.log(Analytics.liveOfferViewed);
-        HapticFeedback.mediumImpact(); // the "kick" when offers land
       }
     }
   }
@@ -547,14 +561,8 @@ class _RecommendTabState extends State<RecommendTab>
   }
 
   CardInfo? _matchHeldCard(String hint, List<CardInfo> held) {
-    final words = hint
-        .toLowerCase()
-        .split(RegExp(r'\W+'))
-        .where((w) => w.length >= 4)
-        .toList();
     for (final c in held) {
-      final n = '${c.issuer} ${c.name}'.toLowerCase();
-      if (words.any(n.contains)) return c;
+      if (offerHintMatchesCardText(hint, '${c.issuer} ${c.name}')) return c;
     }
     return null;
   }
@@ -705,12 +713,14 @@ class _RecommendTabState extends State<RecommendTab>
       _result = null;
       _searchMerchant = null;
       _merchantOffers = null;
+      _otherOffers = const [];
       _offerWinner = null;
     });
     try {
       final (lat, lng) = await widget.locationFn();
       final category = await widget.venue.categoryAt(lat, lng) ?? 'general';
       await _recommend(category);
+      _celebrate(_result?.winner.rec.effectiveRate ?? 0, live: false);
     } catch (e) {
       setState(() => _status = 'Location unavailable. Pick a place above.');
     } finally {
@@ -728,10 +738,12 @@ class _RecommendTabState extends State<RecommendTab>
       _result = null;
       _searchMerchant = null;
       _merchantOffers = null;
+      _otherOffers = const [];
       _offerWinner = null;
     });
     try {
       await _recommend(category);
+      _celebrate(_result?.winner.rec.effectiveRate ?? 0, live: false);
     } catch (e) {
       setState(() => _status = 'Something went wrong. Try again.');
     } finally {
@@ -789,6 +801,23 @@ class _RecommendTabState extends State<RecommendTab>
           ? 'at $_searchMerchant'
           : 'back on $pretty',
     );
+  }
+
+  /// Fire the on-card celebration for the current top card only.
+  /// Big (crackers) for a live offer or savings >= 10%; light (sparkle) for
+  /// >= 2%; nothing below that. Promoting a runner-up never calls this.
+  void _celebrate(double rate, {required bool live}) {
+    final big = live || rate >= 0.10;
+    if (!big && rate < 0.02) return;
+    if (big) {
+      HapticFeedback.mediumImpact();
+    } else {
+      HapticFeedback.selectionClick(); // softer kick for a light one
+    }
+    setState(() {
+      _celebrateBig = big;
+      _celebrateToken++;
+    });
   }
 
   /// Deck cards: if a merchant %-offer matched a held card, feature it as the
@@ -942,6 +971,7 @@ class _RecommendTabState extends State<RecommendTab>
                   winnerCaption:
                       _offerWinner != null ? 'at $_searchMerchant' : null,
                   celebrateToken: _celebrateToken,
+                  celebrateBig: _celebrateBig,
                 ),
               ),
               _Reveal(
@@ -989,7 +1019,7 @@ class _RecommendTabState extends State<RecommendTab>
               // reason the user searched, and their arrival is celebrated.
               if (_searchMerchant != null) ...[
                 const SizedBox(height: 16),
-                Text('LIVE OFFERS AT ${_searchMerchant!.toUpperCase()}',
+                Text('OFFERS ON YOUR CARDS AT ${_searchMerchant!.toUpperCase()}',
                     style: t.textTheme.labelSmall),
                 const SizedBox(height: 12),
                 if (_searchLoading && _merchantOffers == null)
@@ -1006,12 +1036,18 @@ class _RecommendTabState extends State<RecommendTab>
                               ?.copyWith(color: scheme.onSurfaceVariant)),
                     ]),
                   )
-                else if (_merchantOffers != null && _merchantOffers!.isEmpty)
-                  Text('No live card offers found here right now.',
-                      style: t.textTheme.bodyMedium
-                          ?.copyWith(color: scheme.onSurfaceVariant))
-                else if (_merchantOffers != null && _merchantOffers!.isNotEmpty)
-                  for (final o in _merchantOffers!) _MerchantOfferTile(offer: o),
+                else if (_merchantOffers != null) ...[
+                  if (_merchantOffers!.isNotEmpty)
+                    for (final o in _merchantOffers!)
+                      _MerchantOfferTile(offer: o)
+                  else
+                    Text('None of your cards has an offer here right now.',
+                        style: t.textTheme.bodyMedium
+                            ?.copyWith(color: scheme.onSurfaceVariant)),
+                  // Non-held offers: muted, collapsed, never celebrated.
+                  if (_otherOffers.isNotEmpty)
+                    _OtherCardsOffers(offers: _otherOffers),
+                ],
               ],
               if (r.offers.isNotEmpty) ...[
                 const SizedBox(height: 30),
@@ -1042,8 +1078,10 @@ class _RecommendTabState extends State<RecommendTab>
 /// rise from the base and explode into sparks — strictly clipped to the card.
 class _CelebratableCard extends StatelessWidget {
   final AnimationController controller;
+  final bool big;
   final Widget child;
-  const _CelebratableCard({required this.controller, required this.child});
+  const _CelebratableCard(
+      {required this.controller, required this.big, required this.child});
 
   @override
   Widget build(BuildContext context) {
@@ -1061,7 +1099,8 @@ class _CelebratableCard extends StatelessWidget {
                   if (controller.value == 0 || controller.value == 1) {
                     return const SizedBox.shrink();
                   }
-                  return CustomPaint(painter: _CrackersPainter(controller.value));
+                  return CustomPaint(
+                      painter: _CrackersPainter(controller.value, big));
                 },
               ),
             ),
@@ -1076,7 +1115,8 @@ class _CelebratableCard extends StatelessWidget {
 /// All coordinates are within the card's box (painter is clipped to it).
 class _CrackersPainter extends CustomPainter {
   final double t; // 0..1
-  _CrackersPainter(this.t);
+  final bool big; // big = full crackers; light = a few gentle sparks
+  _CrackersPainter(this.t, this.big);
 
   static const _colors = [
     Color(0xFFE8CE8F), // gold
@@ -1105,9 +1145,13 @@ class _CrackersPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()..style = PaintingStyle.fill;
+    // Light celebration: a few rockets spread across the timeline. Big: all.
+    final active = big
+        ? _launches
+        : [_launches[0], _launches[4], _launches[7]];
 
-    for (var r = 0; r < _launches.length; r++) {
-      final l = _launches[r];
+    for (var r = 0; r < active.length; r++) {
+      final l = active[r];
       final lt = ((t - l.delay) / _window).clamp(0.0, 1.0);
       if (lt <= 0 || lt >= 1) continue;
       final bx = size.width * l.x;
@@ -1141,7 +1185,67 @@ class _CrackersPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _CrackersPainter old) => old.t != t;
+  bool shouldRepaint(covariant _CrackersPainter old) =>
+      old.t != t || old.big != big;
+}
+
+/// Offers for cards the user does NOT hold — shown muted, collapsed by default,
+/// and never celebrated. Honest ("not in your wallet") without distracting from
+/// the cards the user can actually use.
+class _OtherCardsOffers extends StatefulWidget {
+  final List<MerchantOfferView> offers;
+  const _OtherCardsOffers({required this.offers});
+
+  @override
+  State<_OtherCardsOffers> createState() => _OtherCardsOffersState();
+}
+
+class _OtherCardsOffersState extends State<_OtherCardsOffers> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final scheme = t.colorScheme;
+    final n = widget.offers.length;
+    return Padding(
+      padding: const EdgeInsets.only(top: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _open = !_open),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'OFFERS ON OTHER CARDS · NOT IN YOUR WALLET ($n)',
+                    style: t.textTheme.labelSmall
+                        ?.copyWith(color: scheme.onSurfaceVariant),
+                  ),
+                ),
+                Icon(_open ? Icons.expand_less : Icons.expand_more,
+                    size: 18, color: scheme.onSurfaceVariant),
+              ],
+            ),
+          ),
+          if (_open) ...[
+            const SizedBox(height: 12),
+            // Muted so they read as informational, not actionable.
+            Opacity(
+              opacity: 0.6,
+              child: Column(
+                children: [
+                  for (final o in widget.offers) _MerchantOfferTile(offer: o),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 /// Never show the internal token "general" — say "everyday spend" (v1.1 copy).
@@ -1380,12 +1484,14 @@ class _RankedDeck extends StatefulWidget {
   final List<_Ranked> ranked;
   final String category;
   final String? winnerCaption; // overrides "back on <category>" (e.g. offers)
-  final int celebrateToken; // bump to fire the on-card crackers once
+  final int celebrateToken; // bump to fire the on-card celebration once
+  final bool celebrateBig; // big crackers vs a light sparkle
   const _RankedDeck(
       {required this.ranked,
       required this.category,
       this.winnerCaption,
-      this.celebrateToken = 0});
+      this.celebrateToken = 0,
+      this.celebrateBig = false});
 
   @override
   State<_RankedDeck> createState() => _RankedDeckState();
@@ -1396,9 +1502,9 @@ class _RankedDeckState extends State<_RankedDeck>
   static const double _strip = 52;
   late List<_Ranked> _order = List.of(widget.ranked);
 
-  // Crackers burst on the winning card when live offers land.
-  late final AnimationController _celebrate = AnimationController(
-      vsync: this, duration: const Duration(milliseconds: 3000));
+  // Celebration on the winning card. Duration is set per fire (big vs light).
+  late final AnimationController _celebrate =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 3000));
 
   @override
   void dispose() {
@@ -1419,6 +1525,8 @@ class _RankedDeckState extends State<_RankedDeck>
     }
     if (widget.celebrateToken != old.celebrateToken &&
         widget.celebrateToken > 0) {
+      _celebrate.duration = Duration(
+          milliseconds: widget.celebrateBig ? 3000 : 1400);
       _celebrate.forward(from: 0);
     }
   }
@@ -1456,6 +1564,7 @@ class _RankedDeckState extends State<_RankedDeck>
                 child: i == 0
                     ? _CelebratableCard(
                         controller: _celebrate,
+                        big: widget.celebrateBig,
                         child: CardVisual(
                           card: _order.first.card,
                           headline:
@@ -1759,6 +1868,7 @@ class MerchantOfferView {
   final String? description;
   final String? cardHint;
   final String? validUntil;
+  final String? via; // delivering program, e.g. "The Entertainer"
   final bool held; // the offer's card is in the user's wallet
 
   const MerchantOfferView({
@@ -1766,6 +1876,7 @@ class MerchantOfferView {
     this.description,
     this.cardHint,
     this.validUntil,
+    this.via,
     this.held = false,
   });
 
@@ -1773,20 +1884,19 @@ class MerchantOfferView {
       Map<String, dynamic> json, List<String> heldNames) {
     final hint = (json['card_hint'] as String?)?.trim();
     final held = hint != null && hint.isNotEmpty && _matchesHeld(hint, heldNames);
+    final via = (json['via'] as String?)?.trim();
     return MerchantOfferView(
       title: (json['title'] as String?)?.trim() ?? '',
       description: json['description'] as String?,
       cardHint: (hint != null && hint.isEmpty) ? null : hint,
       validUntil: json['valid_until'] as String?,
+      via: (via != null && via.isEmpty) ? null : via,
       held: held,
     );
   }
 
-  static bool _matchesHeld(String hint, List<String> heldNames) {
-    final words =
-        hint.toLowerCase().split(RegExp(r'\W+')).where((w) => w.length >= 4);
-    return heldNames.any((n) => words.any(n.contains));
-  }
+  static bool _matchesHeld(String hint, List<String> heldNames) =>
+      offerHintMatchesAny(hint, heldNames);
 }
 
 class _MerchantOfferTile extends StatefulWidget {
@@ -1879,6 +1989,13 @@ class _MerchantOfferTileState extends State<_MerchantOfferTile> {
                   text: 'In your wallet',
                   color: scheme.onPrimary,
                   background: scheme.primary,
+                ),
+              if (offer.via != null)
+                _Badge(
+                  text: 'via ${offer.via}',
+                  color: scheme.onSurfaceVariant,
+                  background: scheme.onSurface.withValues(alpha: 0.06),
+                  icon: Icons.card_membership,
                 ),
               if (offer.validUntil != null && offer.validUntil!.isNotEmpty)
                 _Badge(

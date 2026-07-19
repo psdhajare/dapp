@@ -30,9 +30,13 @@ class IngestService {
   }
 
   /// Live merchant lookup: {merchant, category, offers[], source_ref, cached}.
-  /// offers[] items: {title, description, card_hint, valid_until}.
-  Future<Map<String, dynamic>> search(String merchant) =>
-      _post(endpoint.replace(path: '/search'), {'merchant': merchant});
+  /// offers[] items: {title, description, card_hint, valid_until, via}.
+  /// [cards] are the user's held card names, used to target loyalty-program
+  /// offers (e.g. Wio → Entertainer); not persisted server-side.
+  Future<Map<String, dynamic>> search(String merchant,
+          {List<String> cards = const []}) =>
+      _post(endpoint.replace(path: '/search'),
+          {'merchant': merchant, 'cards': cards});
 
   Future<Map<String, dynamic>> _post(Uri url, Map<String, dynamic> json) async {
     final http.Response resp;

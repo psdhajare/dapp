@@ -24,6 +24,7 @@ from .cli import run_auto
 from .extract import Extraction
 from .llm import get_client
 from .merchant import find_merchant_offers, result_to_dict
+from .programs import programs_for_cards
 from .security import InputError, RateLimiter, sanitize_query
 
 DB_PATH = os.environ.get("INGEST_DB", "db/cards.db")
@@ -129,13 +130,25 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_search(self):
         req = self._read_json()
         merchant = sanitize_query(req.get("merchant"))  # InputError -> 400
-        key = merchant.lower()
+        # The user's held card names, used to target loyalty-program checks and
+        # scope offers. Sanitized; NOT logged or persisted beyond the cache key.
+        raw_cards = req.get("cards")
+        cards: list[str] = []
+        if isinstance(raw_cards, list):
+            for c in raw_cards[:20]:
+                try:
+                    cards.append(sanitize_query(c))
+                except InputError:
+                    continue
+        # Cache depends on which programs the cards grant (not identity).
+        progs = programs_for_cards(cards)
+        key = merchant.lower() + "|" + ",".join(sorted(progs))
         cached = _cache_get(key)
         if cached is not None:
             self._send(200, dict(cached, cached=True))
             return
         # No client 'url' override (SSRF guard) — pipeline finds it itself.
-        result = find_merchant_offers(merchant, get_client())
+        result = find_merchant_offers(merchant, get_client(), cards=cards)
         payload = result_to_dict(result)
         # Cache a real hit for a day; a miss only briefly so it retries soon.
         ttl = CACHE_TTL if payload.get("offers") else MISS_CACHE_TTL

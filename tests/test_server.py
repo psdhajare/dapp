@@ -31,7 +31,7 @@ def running_server(monkeypatch, tmp_path):
     # Count how many times the (expensive) merchant pipeline runs.
     calls = {"n": 0}
 
-    def fake_find(merchant, client, url=None):
+    def fake_find(merchant, client, url=None, cards=None):
         calls["n"] += 1
         return MerchantResult(
             merchant=merchant, category="beauty",

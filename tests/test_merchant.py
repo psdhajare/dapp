@@ -43,9 +43,25 @@ def test_category_from_keyword_even_if_search_fails(monkeypatch):
     assert r.offers == []
 
 
+def test_irrelevant_pages_are_dropped(monkeypatch):
+    # A generic bonus/aggregator page that never names the merchant must not be
+    # used as a source or fed to the LLM (the sushi-library / mypointslife bug).
+    monkeypatch.setattr(discover, "search", lambda q: [
+        "https://www.mypointslife.com/bank-account-bonus-promotions-and-offers/",
+    ])
+    monkeypatch.setattr(
+        discover, "fetch_text",
+        lambda u, timeout=0: "Best US bank account bonuses and credit card promotions")
+
+    r = find_merchant_offers("Sushi Library", FakeLLM(OFFERS_JSON))
+    assert r.offers == []          # nothing extracted from an irrelevant page
+    assert r.source_ref is None    # do NOT surface the junk page as the source
+
+
 def test_result_to_dict_shape(monkeypatch):
     monkeypatch.setattr(discover, "search", lambda q: ["https://x.ae/offer"])
-    monkeypatch.setattr(discover, "fetch_text", lambda u, timeout=0: "text")
+    monkeypatch.setattr(
+        discover, "fetch_text", lambda u, timeout=0: "Some Cafe card offer")
     d = result_to_dict(find_merchant_offers("Some Cafe", FakeLLM(OFFERS_JSON)))
     assert set(d) == {"merchant", "category", "offers", "source_ref"}
     assert d["offers"][0]["title"] == "20% off"

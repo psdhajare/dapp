@@ -13,7 +13,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
-from . import discover
+from . import discover, programs
 from .classify import classify
 from .llm import LLMClient
 from .models import VALID_CATEGORIES
@@ -51,6 +51,7 @@ class MerchantOffer:
     description: str | None = None
     card_hint: str | None = None
     valid_until: str | None = None
+    via: str | None = None  # delivering program, e.g. "The Entertainer"
 
 
 @dataclass
@@ -78,14 +79,27 @@ _COMBINED_CHARS = 24000
 _FETCH_TIMEOUT = 12  # seconds; a slow page shouldn't stall the whole search
 
 
+def _merchant_tokens(merchant: str) -> list[str]:
+    """Distinctive words identifying the merchant (>2 chars)."""
+    return [w for w in re.split(r"\W+", merchant.lower()) if len(w) > 2]
+
+
+def _mentions_merchant(text: str, tokens: list[str]) -> bool:
+    """True if the page text actually names the merchant — the relevance gate
+    that keeps generic bonus/aggregator pages out of the extraction."""
+    tl = text.lower()
+    return any(tok in tl for tok in tokens)
+
+
 def _rank_offer_urls(urls: list[str], merchant: str) -> list[str]:
-    """Prefer URLs that look like offer/deal pages and mention the merchant."""
-    words = [w for w in re.split(r"\W+", merchant.lower()) if len(w) > 2]
+    """Rank by MERCHANT identity first, offer-page hints second. A page that
+    doesn't name the merchant is almost certainly the wrong page."""
+    words = _merchant_tokens(merchant)
 
     def score(u: str) -> int:
         ul = u.lower()
-        return (sum(2 for h in _OFFER_HINTS if h in ul)
-                + sum(1 for w in words if w in ul))
+        return (sum(4 for w in words if w in ul)          # merchant dominates
+                + sum(1 for h in _OFFER_HINTS if h in ul))  # offer-hint tiebreak
 
     return sorted(urls, key=score, reverse=True)
 
@@ -110,22 +124,56 @@ def _gather_urls(merchant: str) -> list[str]:
     return seen
 
 
+def _program_offers(merchant: str, cards: list[str] | None) -> list[MerchantOffer]:
+    """Offers delivered by loyalty programs the user's cards grant, when the
+    merchant participates. Only granted programs are checked (no waste)."""
+    if not cards:
+        return []
+    keys = programs.programs_for_cards(cards)
+    if not keys:
+        return []
+    with ThreadPoolExecutor(max_workers=len(keys)) as pool:
+        members = list(pool.map(
+            lambda k: (k, programs.merchant_on_program(merchant, k)), keys))
+    out: list[MerchantOffer] = []
+    for key, is_member in members:
+        if not is_member:
+            continue
+        prog = programs.PROGRAMS[key]
+        grantors = programs.granting_cards(key, cards)
+        hint = grantors[0] if grantors else prog.name
+        out.append(MerchantOffer(
+            title=prog.default_offer,
+            description=f"Included with your {hint} card via {prog.name}.",
+            card_hint=hint,
+            via=prog.name,
+        ))
+    return out
+
+
 def find_merchant_offers(
-    merchant: str, client: LLMClient, url: str | None = None
+    merchant: str, client: LLMClient, url: str | None = None,
+    cards: list[str] | None = None,
 ) -> MerchantResult:
     """Search the web for the merchant and extract card offers via the LLM.
 
     Fetches the top few offer-ranked pages and extracts from their combined
     text, so bank 'lifestyle/deals' portals are caught, not just the first hit.
+
+    If [cards] (the user's held card names) is given, also checks the loyalty
+    programs those cards grant (e.g. Wio → The Entertainer) and adds a program
+    offer when the merchant participates — catching offers that live on no bank
+    page. Only the granted programs are checked, so nothing is wasted.
     """
     category = classify(merchant, client)
 
     texts: list[str] = []
-    source_ref = url
+    source_ref = None
     try:
-        urls = [url] if url else \
-            _rank_offer_urls(_gather_urls(merchant), merchant)[:_MAX_CANDIDATES]
-        source_ref = urls[0] if urls else None
+        if url:
+            urls = [url]
+        else:
+            urls = _rank_offer_urls(_gather_urls(merchant), merchant)[:_MAX_CANDIDATES]
 
         def _fetch(u: str) -> str:
             try:
@@ -133,47 +181,54 @@ def find_merchant_offers(
             except Exception:
                 return ""
 
-        # Fetch candidates in parallel; keep only pages that actually yield text
-        # (skips JS-only SPAs), in rank order, up to _MAX_PAGES. Point source_ref
-        # at the first readable page so it reflects what was actually extracted.
+        # Fetch candidates in parallel, then keep only pages that (a) yield text
+        # (skips JS-only SPAs) AND (b) actually NAME the merchant. Rule (b) is the
+        # accuracy gate: it drops generic bonus/aggregator pages that would
+        # otherwise mislead extraction and set a wrong source. An explicit `url`
+        # override is trusted as-is.
+        tokens = _merchant_tokens(merchant)
         with ThreadPoolExecutor(max_workers=len(urls) or 1) as pool:
             for u, t in zip(urls, pool.map(_fetch, urls)):
                 if not t.strip():
+                    continue
+                if not url and not _mentions_merchant(t, tokens):
                     continue
                 if not texts:
                     source_ref = u
                 texts.append(t[:_PER_PAGE_CHARS])
                 if len(texts) >= _MAX_PAGES:
                     break
-    except Exception:  # network/search failure -> best card still works, no offers
-        return MerchantResult(merchant=merchant, category=category, offers=[])
+    except Exception:  # network/search failure -> still try program offers below
+        texts = []
 
-    if not texts:
-        return MerchantResult(
-            merchant=merchant, category=category, offers=[], source_ref=source_ref)
+    # Direct offers from the merchant's own / deal pages (may be empty).
+    offers: list[MerchantOffer] = []
+    if texts:
+        combined = "\n\n".join(texts)[:_COMBINED_CHARS]
+        raw = client.complete(
+            _SYSTEM, _USER.format(merchant=merchant, text=combined))
+        data = _parse(raw)
+        cat = data.get("category")
+        if cat in VALID_CATEGORIES:
+            category = cat
+        for o in data.get("offers") or []:
+            title = (o.get("title") or "").strip()
+            if not title:
+                continue
+            offers.append(MerchantOffer(
+                title=title,
+                description=o.get("description"),
+                card_hint=o.get("card_hint"),
+                valid_until=o.get("valid_until"),
+            ))
 
-    combined = "\n\n".join(texts)[:_COMBINED_CHARS]
-    raw = client.complete(_SYSTEM, _USER.format(merchant=merchant, text=combined))
-    data = _parse(raw)
-
-    cat = data.get("category")
-    if cat in VALID_CATEGORIES:
-        category = cat
-
-    offers = []
-    for o in data.get("offers") or []:
-        title = (o.get("title") or "").strip()
-        if not title:
-            continue
-        offers.append(MerchantOffer(
-            title=title,
-            description=o.get("description"),
-            card_hint=o.get("card_hint"),
-            valid_until=o.get("valid_until"),
-        ))
+    # Program offers (Wio → Entertainer, …) — checked even with no direct text,
+    # since these often live on no bank page. Wallet-relevant, so listed first.
+    program_offers = _program_offers(merchant, cards)
 
     return MerchantResult(
-        merchant=merchant, category=category, offers=offers, source_ref=source_ref
+        merchant=merchant, category=category,
+        offers=program_offers + offers, source_ref=source_ref
     )
 
 
