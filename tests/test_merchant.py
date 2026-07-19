@@ -22,7 +22,7 @@ def test_find_offers_happy_path(monkeypatch):
         "https://wallethub.com/best-baby-cards",
         "https://lifestyle.emiratesnbd.com/en/deals/glossy-salon-offer",
     ])
-    monkeypatch.setattr(discover, "fetch_text", lambda u: "Glossy Salon offers ...")
+    monkeypatch.setattr(discover, "fetch_text", lambda u, timeout=0: "Glossy Salon offers ...")
 
     r = find_merchant_offers("Glossy Hair Salon", FakeLLM(OFFERS_JSON))
     assert r.category == "beauty"
@@ -45,7 +45,7 @@ def test_category_from_keyword_even_if_search_fails(monkeypatch):
 
 def test_result_to_dict_shape(monkeypatch):
     monkeypatch.setattr(discover, "search", lambda q: ["https://x.ae/offer"])
-    monkeypatch.setattr(discover, "fetch_text", lambda u: "text")
+    monkeypatch.setattr(discover, "fetch_text", lambda u, timeout=0: "text")
     d = result_to_dict(find_merchant_offers("Some Cafe", FakeLLM(OFFERS_JSON)))
     assert set(d) == {"merchant", "category", "offers", "source_ref"}
     assert d["offers"][0]["title"] == "20% off"

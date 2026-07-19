@@ -123,37 +123,51 @@ class RootScreen extends StatefulWidget {
 class _RootScreenState extends State<RootScreen> {
   int _tab = 0;
   final _recommendKey = GlobalKey<_RecommendTabState>();
+  final _pager = PageController();
+
+  @override
+  void dispose() {
+    _pager.dispose();
+    super.dispose();
+  }
+
+  void _goTo(int i) {
+    _pager.animateToPage(i,
+        duration: const Duration(milliseconds: 300), curve: Curves.easeOutQuart);
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
         bottom: false,
-        child: AnimatedSwitcher(
-          duration: ConciergeMotion.rerank,
-          switchInCurve: Curves.easeOutQuart,
-          switchOutCurve: Curves.easeOutQuart,
-          transitionBuilder: (child, anim) =>
-              FadeTransition(opacity: anim, child: child),
-          child: _tab == 0
-              ? RecommendTab(
-                  key: _recommendKey,
-                  dao: widget.dao,
-                  venue: widget.venue,
-                  locationFn: widget.locationFn,
-                  profile: widget.profile,
-                  ingest: widget.ingest,
-                )
-              : WalletTab(
-                  dao: widget.dao,
-                  ingest: widget.ingest,
-                  onWalletChanged: () =>
-                      _recommendKey.currentState?.refreshAfterWalletChange(),
-                ),
+        child: PageView(
+          controller: _pager,
+          onPageChanged: (i) {
+            setState(() => _tab = i);
+            if (i == 0) {
+              _recommendKey.currentState?.refreshAfterWalletChange();
+            }
+          },
+          children: [
+            RecommendTab(
+              key: _recommendKey,
+              dao: widget.dao,
+              venue: widget.venue,
+              locationFn: widget.locationFn,
+              profile: widget.profile,
+              ingest: widget.ingest,
+            ),
+            WalletTab(
+              dao: widget.dao,
+              ingest: widget.ingest,
+              onWalletChanged: () =>
+                  _recommendKey.currentState?.refreshAfterWalletChange(),
+            ),
+          ],
         ),
       ),
-      bottomNavigationBar:
-          _BlurNav(tab: _tab, onSelect: (i) => setState(() => _tab = i)),
+      bottomNavigationBar: _BlurNav(tab: _tab, onSelect: _goTo),
     );
   }
 }
@@ -247,19 +261,25 @@ class _RecommendTabState extends State<RecommendTab> {
   bool _locating = false;
 
   final _searchCtl = TextEditingController();
+  final _searchFocus = FocusNode();
   String? _searchMerchant; // the queried merchant, when in search mode
   bool _searchLoading = false;
   List<MerchantOfferView>? _merchantOffers;
+  _Ranked? _offerWinner; // a held card with a %-offer at the merchant, if any
+  final Set<int> _revealed = {}; // reveal ids already animated this result
 
   @override
   void initState() {
     super.initState();
+    // Rebuild when focus changes so the recent-searches panel shows/hides.
+    _searchFocus.addListener(() => setState(() {}));
     WidgetsBinding.instance.addPostFrameCallback((_) => _recommend('general'));
   }
 
   @override
   void dispose() {
     _searchCtl.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
@@ -279,44 +299,40 @@ class _RecommendTabState extends State<RecommendTab> {
       _toast(e.message);
       return;
     }
-    // 2) Client rate limit (10/min, shared with add-card).
-    if (!queryRateLimiter.tryAcquire()) {
-      final secs = queryRateLimiter.retryAfter().inSeconds;
-      _toast('Too many searches — try again in ${secs}s.');
-      return;
-    }
+    widget.profile.addSearch(merchant); // record (no-op if history disabled)
     setState(() {
       _selected = 'search';
       _searchMerchant = merchant;
       _merchantOffers = null;
       _loading = true;
     });
-    // Instant best-card from the offline category.
+    // Instant best-card from the offline keyword category.
     await _recommend(categoryForMerchant(merchant));
     setState(() => _loading = false);
 
+    final key = merchant.toLowerCase();
+
+    // 2) Cache-aside: a fresh local hit is instant + offline, no rate-limit cost.
+    final cached = await widget.dao.cachedSearch(key);
+    if (cached != null) {
+      await _applySearchPayload(cached);
+      return;
+    }
+
+    // 3) Client rate limit (10/min, shared with add-card) — only on real calls.
+    if (!queryRateLimiter.tryAcquire()) {
+      final secs = queryRateLimiter.retryAfter().inSeconds;
+      _toast('Too many searches — try again in ${secs}s.');
+      return;
+    }
     final ingest = widget.ingest;
     if (ingest == null) return;
     setState(() => _searchLoading = true);
     try {
       final data = await ingest.search(merchant);
-      final refined = data['category'] as String?;
-      if (refined != null && refined != _result?.category) {
-        await _recommend(refined); // re-rank on the refined category
-      }
-      final held = await widget.dao.allCards();
-      final heldNames = held
-          .where((c) => c.held)
-          .map((c) => '${c.issuer} ${c.name}'.toLowerCase())
-          .toList();
-      final offers = <MerchantOfferView>[
-        for (final o in (data['offers'] as List? ?? []))
-          MerchantOfferView.fromJson(
-              (o as Map).cast<String, dynamic>(), heldNames),
-      ];
-      if (mounted) setState(() => _merchantOffers = offers);
+      await widget.dao.cacheSearch(key, data); // 24h TTL
+      await _applySearchPayload(data);
     } on IngestException catch (e) {
-      // Surface server-side rejections (rate limit / validation) too.
       if (mounted) {
         setState(() => _merchantOffers = const []);
         _toast(e.message);
@@ -326,6 +342,72 @@ class _RecommendTabState extends State<RecommendTab> {
     } finally {
       if (mounted) setState(() => _searchLoading = false);
     }
+  }
+
+  /// Turns a /search payload (from cache or network) into UI state: refined
+  /// category re-rank, offer list, and the featured %-offer deck winner. Held
+  /// highlights are recomputed from the current wallet, so cache stays
+  /// wallet-independent.
+  Future<void> _applySearchPayload(Map<String, dynamic> data) async {
+    final refined = data['category'] as String?;
+    if (refined != null && refined != _result?.category) {
+      await _recommend(refined);
+    }
+    final held = (await widget.dao.allCards()).where((c) => c.held).toList();
+    final heldNames =
+        held.map((c) => '${c.issuer} ${c.name}'.toLowerCase()).toList();
+    final rawOffers = (data['offers'] as List? ?? []);
+    final offers = <MerchantOfferView>[
+      for (final o in rawOffers)
+        MerchantOfferView.fromJson((o as Map).cast<String, dynamic>(), heldNames),
+    ];
+    // Most relevant first: offers on cards the user actually holds lead the list.
+    offers.sort((a, b) => (b.held ? 1 : 0).compareTo(a.held ? 1 : 0));
+    _Ranked? offerWinner;
+    var bestPct = 0.0;
+    for (final o in rawOffers) {
+      final m = (o as Map).cast<String, dynamic>();
+      final hint = (m['card_hint'] as String?)?.trim();
+      if (hint == null || hint.isEmpty) continue;
+      final pct = _parsePercent('${m['title'] ?? ''} ${m['description'] ?? ''}');
+      if (pct == null || pct <= bestPct) continue;
+      final card = _matchHeldCard(hint, held);
+      if (card == null) continue;
+      bestPct = pct;
+      offerWinner = _Ranked(
+        card,
+        Recommendation(
+          cardId: card.id,
+          categoryUsed: 'offer',
+          effectiveRate: pct / 100,
+          hasCap: false,
+        ),
+      );
+    }
+    if (mounted) {
+      setState(() {
+        _merchantOffers = offers;
+        _offerWinner = offerWinner;
+      });
+    }
+  }
+
+  double? _parsePercent(String s) {
+    final m = RegExp(r'(\d+(?:\.\d+)?)\s*%').firstMatch(s);
+    return m == null ? null : double.tryParse(m.group(1)!);
+  }
+
+  CardInfo? _matchHeldCard(String hint, List<CardInfo> held) {
+    final words = hint
+        .toLowerCase()
+        .split(RegExp(r'\W+'))
+        .where((w) => w.length >= 4)
+        .toList();
+    for (final c in held) {
+      final n = '${c.issuer} ${c.name}'.toLowerCase();
+      if (words.any(n.contains)) return c;
+    }
+    return null;
   }
 
   void _toast(String message) {
@@ -349,6 +431,7 @@ class _RecommendTabState extends State<RecommendTab> {
       _result = null;
       _searchMerchant = null;
       _merchantOffers = null;
+      _offerWinner = null;
     });
     try {
       final (lat, lng) = await widget.locationFn();
@@ -371,6 +454,7 @@ class _RecommendTabState extends State<RecommendTab> {
       _result = null;
       _searchMerchant = null;
       _merchantOffers = null;
+      _offerWinner = null;
     });
     try {
       await _recommend(category);
@@ -403,8 +487,20 @@ class _RecommendTabState extends State<RecommendTab> {
     final offers = await widget.dao.offersForCategory(category);
     setState(() {
       _status = null;
+      _revealed.clear(); // new result -> entrances play once, then stay put
       _result = _Result(category, ranked, hints, offers);
     });
+  }
+
+  /// Deck cards: if a merchant %-offer matched a held card, feature it as the
+  /// winner (with its offer rate) above the category-ranked cards.
+  List<_Ranked> _deckRanked(_Result r) {
+    final w = _offerWinner;
+    if (w == null) return r.ranked;
+    return [
+      w,
+      ...r.ranked.where((x) => x.card.id != w.card.id),
+    ].take(3).toList();
   }
 
   @override
@@ -412,9 +508,15 @@ class _RecommendTabState extends State<RecommendTab> {
     final t = Theme.of(context);
     final scheme = t.colorScheme;
     final r = _result;
-    return Stack(
+    return GestureDetector(
+      // Tap empty space to dismiss the keyboard (standard mobile behavior).
+      behavior: HitTestBehavior.translucent,
+      onTap: () => FocusScope.of(context).unfocus(),
+      child: Stack(
       children: [
         ListView(
+          // Dragging the list also dismisses the keyboard.
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 120),
           children: [
             AnimatedBuilder(
@@ -448,6 +550,7 @@ class _RecommendTabState extends State<RecommendTab> {
             TextField(
               key: const Key('merchant_search'),
               controller: _searchCtl,
+              focusNode: _searchFocus,
               textInputAction: TextInputAction.search,
               onSubmitted: _search,
               decoration: InputDecoration(
@@ -461,8 +564,27 @@ class _RecommendTabState extends State<RecommendTab> {
                             height: 18,
                             child: CircularProgressIndicator(strokeWidth: 2)),
                       )
-                    : null,
+                    : (_searchCtl.text.isNotEmpty || _searchFocus.hasFocus)
+                        ? IconButton(
+                            icon: const Icon(Icons.close, size: 18),
+                            tooltip: 'Clear',
+                            onPressed: () {
+                              _searchCtl.clear();
+                              FocusScope.of(context).unfocus();
+                              setState(() {});
+                            },
+                          )
+                        : null,
               ),
+              onChanged: (_) => setState(() {}),
+            ),
+            _RecentSearches(
+              profile: widget.profile,
+              visible: _searchFocus.hasFocus,
+              onPick: (term) {
+                _searchCtl.text = term;
+                _search(term);
+              },
             ),
             const SizedBox(height: 14),
             _VenueChips(
@@ -494,6 +616,7 @@ class _RecommendTabState extends State<RecommendTab> {
             else ...[
               _Reveal(
                 order: 0,
+                revealed: _revealed,
                 child: Text(
                   _searchMerchant != null
                       ? 'Best at $_searchMerchant'
@@ -507,11 +630,18 @@ class _RecommendTabState extends State<RecommendTab> {
               const SizedBox(height: 14),
               _Reveal(
                 order: 1,
-                child: _RankedDeck(ranked: r.ranked, category: r.category),
+                revealed: _revealed,
+                child: _RankedDeck(
+                  ranked: _deckRanked(r),
+                  category: r.category,
+                  winnerCaption:
+                      _offerWinner != null ? 'at $_searchMerchant' : null,
+                ),
               ),
               if (r.winner.rec.hasCap)
                 _Reveal(
                   order: 2,
+                revealed: _revealed,
                   child: Padding(
                     padding: const EdgeInsets.only(top: 14),
                     child: _InfoPill(
@@ -525,6 +655,7 @@ class _RecommendTabState extends State<RecommendTab> {
               for (final (label, hint) in r.hints)
                 _Reveal(
                   order: 3,
+                revealed: _revealed,
                   child: Padding(
                     padding: const EdgeInsets.only(top: 10),
                     child: _InfoPill(
@@ -539,6 +670,7 @@ class _RecommendTabState extends State<RecommendTab> {
                 const SizedBox(height: 30),
                 _Reveal(
                   order: 4,
+                revealed: _revealed,
                   child: Text('PERKS FOR ${r.category.toUpperCase()}',
                       style: t.textTheme.labelSmall),
                 ),
@@ -546,6 +678,7 @@ class _RecommendTabState extends State<RecommendTab> {
                 for (final (i, o) in r.offers.indexed)
                   _Reveal(
                     order: 5 + i,
+                revealed: _revealed,
                     child: _OfferTile(offer: o, category: r.category),
                   ),
               ],
@@ -589,6 +722,7 @@ class _RecommendTabState extends State<RecommendTab> {
           ),
         ),
       ],
+      ),
     );
   }
 }
@@ -607,6 +741,76 @@ String _period(String p) => switch (p) {
       'yearly' => 'year',
       _ => p,
     };
+
+// ---------------------------------------------------------------------------
+// Recent searches — shown under the field while focused (toggle in Profile)
+// ---------------------------------------------------------------------------
+
+class _RecentSearches extends StatelessWidget {
+  final ProfileStore profile;
+  final bool visible;
+  final ValueChanged<String> onPick;
+  const _RecentSearches(
+      {required this.profile, required this.visible, required this.onPick});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: profile,
+      builder: (context, _) {
+        final items = profile.searchHistory;
+        if (!visible || !profile.searchHistoryEnabled || items.isEmpty) {
+          return const SizedBox.shrink();
+        }
+        final t = Theme.of(context);
+        final scheme = t.colorScheme;
+        return Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('RECENT', style: t.textTheme.labelSmall),
+                  GestureDetector(
+                    onTap: profile.clearSearchHistory,
+                    child: Text('Clear',
+                        style: t.textTheme.labelMedium
+                            ?.copyWith(color: scheme.primary)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              for (final term in items)
+                InkWell(
+                  onTap: () => onPick(term),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Row(
+                      children: [
+                        Icon(Icons.history,
+                            size: 18, color: scheme.onSurfaceVariant),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(term,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: t.textTheme.bodyMedium),
+                        ),
+                        Icon(Icons.north_west,
+                            size: 15, color: scheme.onSurfaceVariant),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Venue chips — five equal icon-only stadium chips across the gutter
@@ -837,6 +1041,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ),
             ),
           ),
+          const SizedBox(height: 28),
+          Text('SEARCH', style: t.textTheme.labelSmall),
+          const SizedBox(height: 4),
+          AnimatedBuilder(
+            animation: widget.profile,
+            builder: (context, _) => SwitchListTile(
+              key: const Key('search_history_toggle'),
+              contentPadding: EdgeInsets.zero,
+              title: Text('Save recent searches', style: t.textTheme.bodyMedium),
+              subtitle: Text('Show your last 10 searches under the search bar.',
+                  style: t.textTheme.bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant)),
+              value: widget.profile.searchHistoryEnabled,
+              onChanged: widget.profile.setSearchHistoryEnabled,
+            ),
+          ),
         ],
       ),
     );
@@ -896,7 +1116,13 @@ class _ThemeOption extends StatelessWidget {
 class _Reveal extends StatefulWidget {
   final int order;
   final Widget child;
-  const _Reveal({required this.order, required this.child});
+
+  /// Set of reveal ids already played this result-generation. Once an item has
+  /// animated, scrolling it off and back shows it instantly instead of
+  /// re-running the entrance. Cleared by the parent when a new result loads.
+  final Set<int>? revealed;
+
+  const _Reveal({required this.order, required this.child, this.revealed});
 
   @override
   State<_Reveal> createState() => _RevealState();
@@ -912,8 +1138,13 @@ class _RevealState extends State<_Reveal>
   @override
   void initState() {
     super.initState();
-    Future.delayed(
-        ConciergeMotion.stagger * widget.order, () {
+    final seen = widget.revealed;
+    if (seen != null && seen.contains(widget.order)) {
+      _c.value = 1.0; // already revealed once — show instantly on re-scroll
+      return;
+    }
+    seen?.add(widget.order); // mark so it won't re-animate later
+    Future.delayed(ConciergeMotion.stagger * widget.order, () {
       if (mounted) _c.forward();
     });
   }
@@ -945,49 +1176,81 @@ class _RevealState extends State<_Reveal>
 // The ranked deck — winner full, ranks 2-3 stacked behind, bottom strip shown
 // ---------------------------------------------------------------------------
 
-class _RankedDeck extends StatelessWidget {
+class _RankedDeck extends StatefulWidget {
   final List<_Ranked> ranked;
   final String category;
-  const _RankedDeck({required this.ranked, required this.category});
+  final String? winnerCaption; // overrides "back on <category>" (e.g. offers)
+  const _RankedDeck(
+      {required this.ranked, required this.category, this.winnerCaption});
 
+  @override
+  State<_RankedDeck> createState() => _RankedDeckState();
+}
+
+class _RankedDeckState extends State<_RankedDeck> {
   static const double _strip = 52;
+  late List<_Ranked> _order = List.of(widget.ranked);
+
+  @override
+  void didUpdateWidget(_RankedDeck old) {
+    super.didUpdateWidget(old);
+    // Reset the user's promotion only when the underlying set of cards changes
+    // (a new search/category), not on incidental parent rebuilds.
+    final incoming = widget.ranked.map((r) => r.card.id).toSet();
+    final current = _order.map((r) => r.card.id).toSet();
+    if (incoming.length != current.length ||
+        !incoming.containsAll(current)) {
+      _order = List.of(widget.ranked);
+    }
+  }
+
+  void _promote(int index) {
+    if (index == 0) return;
+    setState(() {
+      final picked = _order.removeAt(index);
+      _order.insert(0, picked);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(builder: (context, c) {
       final width = c.maxWidth;
       final winnerH = width / kCardAspect;
-      final extra = (ranked.length - 1) * _strip;
+      final height = winnerH + (_order.length - 1) * _strip;
       return SizedBox(
-        height: winnerH + extra,
+        height: height,
         child: Stack(
           clipBehavior: Clip.none,
           children: [
-            // Back cards first (rank 3 furthest back).
-            for (int i = ranked.length - 1; i >= 1; i--)
-              Positioned(
+            // Paint back-to-front so the winner (index 0) is on top; keyed by
+            // card id so AnimatedPositioned slides each card on reorder.
+            for (int i = _order.length - 1; i >= 0; i--)
+              AnimatedPositioned(
+                key: ValueKey(_order[i].card.id),
+                duration: ConciergeMotion.rerank,
+                curve: Curves.easeInOutCubic,
                 top: _strip * i,
                 left: 8.0 * i,
                 right: 8.0 * i,
                 height: winnerH,
-                child: _BackCard(
-                  rank: i + 1,
-                  ranked: ranked[i],
-                  stripHeight: _strip,
-                ),
+                child: i == 0
+                    ? _CardVisual(
+                        card: _order.first.card,
+                        headline:
+                            '${(_order.first.rec.effectiveRate * 100).toStringAsFixed(2)}%',
+                        caption: widget.winnerCaption ??
+                            'back on ${widget.category}',
+                      )
+                    : GestureDetector(
+                        onTap: () => _promote(i),
+                        child: _BackCard(
+                          rank: i + 1,
+                          ranked: _order[i],
+                          stripHeight: _strip,
+                        ),
+                      ),
               ),
-            // Winner on top, rendered in full.
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: _CardVisual(
-                card: ranked.first.card,
-                headline:
-                    '${(ranked.first.rec.effectiveRate * 100).toStringAsFixed(2)}%',
-                caption: 'back on $category',
-              ),
-            ),
           ],
         ),
       );
@@ -1267,50 +1530,81 @@ class MerchantOfferView {
   }
 }
 
-class _MerchantOfferTile extends StatelessWidget {
+class _MerchantOfferTile extends StatefulWidget {
   final MerchantOfferView offer;
   const _MerchantOfferTile({required this.offer});
 
   @override
+  State<_MerchantOfferTile> createState() => _MerchantOfferTileState();
+}
+
+class _MerchantOfferTileState extends State<_MerchantOfferTile> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
+    final offer = widget.offer;
     final t = Theme.of(context);
     final scheme = t.colorScheme;
-    return Container(
-      key: const Key('merchant_offer'),
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: scheme.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: offer.held ? Border.all(color: scheme.primary, width: 1.5) : null,
-        boxShadow: [
-          BoxShadow(
-            color: (t.brightness == Brightness.dark
-                    ? Colors.black
-                    : const Color(0xFF272219))
-                .withValues(alpha: t.brightness == Brightness.dark ? 0.8 : 0.5),
-            blurRadius: 18,
-            spreadRadius: -14,
-            offset: const Offset(0, 6),
+    final hasDesc = offer.description != null && offer.description!.isNotEmpty;
+    return GestureDetector(
+      onTap: hasDesc ? () => setState(() => _expanded = !_expanded) : null,
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        alignment: Alignment.topCenter,
+        child: Container(
+          key: const Key('merchant_offer'),
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: scheme.surface,
+            borderRadius: BorderRadius.circular(14),
+            border: offer.held
+                ? Border.all(color: scheme.primary, width: 1.5)
+                : null,
+            boxShadow: [
+              BoxShadow(
+                color: (t.brightness == Brightness.dark
+                        ? Colors.black
+                        : const Color(0xFF272219))
+                    .withValues(
+                        alpha: t.brightness == Brightness.dark ? 0.8 : 0.5),
+                blurRadius: 18,
+                spreadRadius: -14,
+                offset: const Offset(0, 6),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(offer.title,
-              style: t.textTheme.titleSmall,
-              maxLines: 2, overflow: TextOverflow.ellipsis),
-          if (offer.description != null && offer.description!.isNotEmpty) ...[
-            const SizedBox(height: 3),
-            Text(offer.description!,
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-                style: t.textTheme.bodyMedium?.copyWith(
-                    fontSize: 12, height: 1.35, color: scheme.onSurfaceVariant)),
-          ],
-          const SizedBox(height: 8),
-          Wrap(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(offer.title,
+                        style: t.textTheme.titleSmall,
+                        maxLines: _expanded ? null : 2,
+                        overflow: _expanded ? null : TextOverflow.ellipsis),
+                  ),
+                  if (hasDesc)
+                    Icon(_expanded ? Icons.expand_less : Icons.expand_more,
+                        size: 18, color: scheme.onSurfaceVariant),
+                ],
+              ),
+              if (hasDesc) ...[
+                const SizedBox(height: 3),
+                Text(offer.description!,
+                    maxLines: _expanded ? null : 3,
+                    overflow: _expanded ? null : TextOverflow.ellipsis,
+                    style: t.textTheme.bodyMedium?.copyWith(
+                        fontSize: 12,
+                        height: 1.35,
+                        color: scheme.onSurfaceVariant)),
+              ],
+              const SizedBox(height: 8),
+              Wrap(
             spacing: 6,
             runSpacing: 6,
             crossAxisAlignment: WrapCrossAlignment.center,
@@ -1335,8 +1629,10 @@ class _MerchantOfferTile extends StatelessWidget {
                   icon: Icons.schedule,
                 ),
             ],
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

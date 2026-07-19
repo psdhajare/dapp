@@ -95,9 +95,9 @@ def html_to_text(html: str) -> str:
     return "\n".join(parser.parts)
 
 
-def fetch_text(url: str) -> str:
+def fetch_text(url: str, timeout: int = 60) -> str:
     """Fetch a URL and return clean text (HTML stripped, PDFs parsed)."""
-    resp = requests.get(url, headers=HEADERS, timeout=60)
+    resp = requests.get(url, headers=HEADERS, timeout=timeout)
     resp.raise_for_status()
 
     content_type = resp.headers.get("content-type", "")

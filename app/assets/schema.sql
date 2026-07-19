@@ -109,3 +109,12 @@ CREATE TABLE spend_log (
     currency  TEXT NOT NULL DEFAULT 'GBP',
     timestamp TEXT NOT NULL               -- ISO 8601
 );
+
+-- Client cache-aside for merchant /search results. Keyed by the normalized
+-- query; payload is the raw server JSON (category + offers). Wallet-independent
+-- so the deck/held-highlights are recomputed from the current wallet each time.
+CREATE TABLE search_cache (
+    query_key   TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    expires_at  INTEGER NOT NULL          -- epoch millis
+);

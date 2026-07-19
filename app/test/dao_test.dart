@@ -4,6 +4,31 @@ import 'package:flutter_test/flutter_test.dart';
 import 'support.dart';
 
 void main() {
+  test('search cache: store, hit within TTL, expire after', () async {
+    final dao = CardDao(await openSeedDb());
+    final t = DateTime(2026, 7, 19, 12);
+    final payload = {
+      'category': 'beauty',
+      'offers': [
+        {'title': '20% off', 'card_hint': 'Emirates NBD'}
+      ],
+    };
+    await dao.cacheSearch('glossy salon', payload,
+        ttl: const Duration(hours: 24), now: t);
+
+    // Hit within TTL.
+    final hit = await dao.cachedSearch('glossy salon',
+        now: t.add(const Duration(hours: 1)));
+    expect(hit, isNotNull);
+    expect(hit!['category'], 'beauty');
+    expect((hit['offers'] as List).first['title'], '20% off');
+
+    // Miss after TTL (and pruned).
+    final miss = await dao.cachedSearch('glossy salon',
+        now: t.add(const Duration(hours: 25)));
+    expect(miss, isNull);
+  });
+
   test('loadUserCards builds engine inputs from seed DB', () async {
     final dao = CardDao(await openSeedDb());
     final cards = await dao.loadUserCards();

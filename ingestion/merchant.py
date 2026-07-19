@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
 from . import discover
@@ -64,9 +65,12 @@ class MerchantResult:
 _OFFER_HINTS = (
     "offer", "deal", "discount", "cashback", "lifestyle", "promo", "rewards",
 )
-_MAX_PAGES = 3
-_PER_PAGE_CHARS = 8000
-_COMBINED_CHARS = 20000
+# Kept small for latency: fewer pages + a tighter char budget mean a much
+# faster LLM pass. Pages are fetched concurrently.
+_MAX_PAGES = 2
+_PER_PAGE_CHARS = 5000
+_COMBINED_CHARS = 9000
+_FETCH_TIMEOUT = 12  # seconds; a slow page shouldn't stall the whole search
 
 
 def _rank_offer_urls(urls: list[str], merchant: str) -> list[str]:
@@ -107,18 +111,20 @@ def find_merchant_offers(
     texts: list[str] = []
     source_ref = url
     try:
-        if url:
-            t = discover.fetch_text(url)
-            if t.strip():
-                texts.append(t[:_PER_PAGE_CHARS])
-        else:
-            ranked = _rank_offer_urls(_gather_urls(merchant), merchant)[:_MAX_PAGES]
-            source_ref = ranked[0] if ranked else None
-            for u in ranked:
-                try:
-                    t = discover.fetch_text(u)
-                except Exception:
-                    continue
+        urls = [url] if url else \
+            _rank_offer_urls(_gather_urls(merchant), merchant)[:_MAX_PAGES]
+        source_ref = urls[0] if urls else None
+
+        def _fetch(u: str) -> str:
+            try:
+                return discover.fetch_text(u, timeout=_FETCH_TIMEOUT)
+            except Exception:
+                return ""
+
+        # Fetch candidate pages in parallel so total time ~= the slowest page,
+        # not the sum. Preserve rank order in the combined text.
+        with ThreadPoolExecutor(max_workers=len(urls) or 1) as pool:
+            for t in pool.map(_fetch, urls):
                 if t.strip():
                     texts.append(t[:_PER_PAGE_CHARS])
     except Exception:  # network/search failure -> best card still works, no offers

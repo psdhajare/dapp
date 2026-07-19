@@ -1,4 +1,6 @@
 /// C1: reads the bundled SQLite DB into engine inputs.
+import 'dart:convert';
+
 import 'package:engine/engine.dart';
 import 'package:sqflite_common/sqlite_api.dart';
 
@@ -228,5 +230,39 @@ class CardDao {
           description: r['description'] as String?,
         ),
     ];
+  }
+
+  // --- merchant search cache (cache-aside) ---
+
+  /// Cached /search payload for [key], or null if absent/expired. Expired rows
+  /// are pruned lazily on read.
+  Future<Map<String, dynamic>?> cachedSearch(String key, {DateTime? now}) async {
+    final t = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    final rows = await db.query('search_cache',
+        columns: ['payload_json', 'expires_at'],
+        where: 'query_key = ?',
+        whereArgs: [key]);
+    if (rows.isEmpty) return null;
+    if ((rows.first['expires_at'] as int) <= t) {
+      await db.delete('search_cache', where: 'query_key = ?', whereArgs: [key]);
+      return null;
+    }
+    return jsonDecode(rows.first['payload_json'] as String)
+        as Map<String, dynamic>;
+  }
+
+  Future<void> cacheSearch(String key, Map<String, dynamic> payload,
+      {Duration ttl = const Duration(hours: 24), DateTime? now}) async {
+    final expires =
+        (now ?? DateTime.now()).add(ttl).millisecondsSinceEpoch;
+    await db.insert(
+      'search_cache',
+      {
+        'query_key': key,
+        'payload_json': jsonEncode(payload),
+        'expires_at': expires,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 }
