@@ -66,3 +66,52 @@ class GooglePlacesLookup implements VenueLookup {
     }
   }
 }
+
+/// Keyless venue lookup via OpenStreetMap's Overpass API. Returns the OSM tag
+/// values (e.g. "supermarket", "cinema", "restaurant") of nearby POIs, nearest
+/// first, mapped to categories by poi_category_map. Free, no API key.
+class OverpassLookup implements VenueLookup {
+  final http.Client client;
+  final String endpoint;
+  OverpassLookup({
+    http.Client? client,
+    this.endpoint = "https://overpass-api.de/api/interpreter",
+  }) : client = client ?? http.Client();
+
+  @override
+  Future<List<String>> nearbyTypes(double lat, double lng) async {
+    // POIs within 90m carrying a shop/amenity/leisure tag.
+    final q = "[out:json][timeout:10];("
+        "nwr(around:90,$lat,$lng)[shop];"
+        "nwr(around:90,$lat,$lng)[amenity];"
+        "nwr(around:90,$lat,$lng)[leisure];"
+        ");out tags center 30;";
+    try {
+      // Overpass 406s without a User-Agent.
+      final resp = await client.post(Uri.parse(endpoint),
+          headers: {"User-Agent": "ToroKard/1.0 (card recommender)"},
+          body: {"data": q});
+      if (resp.statusCode != 200) return const [];
+      final els = (jsonDecode(resp.body)
+          as Map<String, dynamic>)['elements'] as List<dynamic>? ?? const [];
+      // Sort by distance from the user so the venue they're in wins.
+      final scored = <(double, String)>[];
+      for (final e in els.cast<Map<String, dynamic>>()) {
+        final tags = e['tags'] as Map<String, dynamic>? ?? const {};
+        final type = (tags['shop'] ?? tags['amenity'] ?? tags['leisure'])
+            ?.toString();
+        if (type == null) continue;
+        final elat = (e['lat'] ?? (e['center']?['lat'])) as num?;
+        final elng = (e['lon'] ?? (e['center']?['lon'])) as num?;
+        final d = (elat == null || elng == null)
+            ? 1e9
+            : (elat - lat) * (elat - lat) + (elng - lng) * (elng - lng);
+        scored.add((d.toDouble(), type));
+      }
+      scored.sort((a, b) => a.$1.compareTo(b.$1));
+      return [for (final s in scored) s.$2];
+    } catch (_) {
+      return const []; // degrade to general, never block
+    }
+  }
+}

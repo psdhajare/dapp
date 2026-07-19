@@ -84,7 +84,19 @@ INSERT INTO poi_category_map (places_type, category) VALUES
     ('drugstore', 'health'),
     ('doctor', 'health'),
     ('hospital', 'health'),
-    ('dentist', 'health');
+    ('dentist', 'health'),
+    -- OpenStreetMap (Overpass) tag values:
+    ('fuel', 'fuel'),
+    ('cinema', 'entertainment'),
+    ('theatre', 'entertainment'),
+    ('fast_food', 'dining'),
+    ('pub', 'dining'),
+    ('food_court', 'dining'),
+    ('convenience', 'grocery'),
+    ('marketplace', 'grocery'),
+    ('hairdresser', 'beauty'),
+    ('chemist', 'health'),
+    ('clinic', 'health');
 
 -- Cards the user actually holds (the "wallet").
 CREATE TABLE user_cards (
