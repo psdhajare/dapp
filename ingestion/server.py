@@ -29,7 +29,9 @@ from .security import InputError, RateLimiter, sanitize_query
 DB_PATH = os.environ.get("INGEST_DB", "db/cards.db")
 HOST = os.environ.get("INGEST_HOST", "0.0.0.0")
 PORT = int(os.environ.get("INGEST_PORT", "8765"))
-CACHE_TTL = int(os.environ.get("INGEST_CACHE_TTL", "86400"))  # 24h
+CACHE_TTL = int(os.environ.get("INGEST_CACHE_TTL", "86400"))  # 24h for hits
+# Misses (no offers found) expire fast so a real offer isn't hidden for a day.
+MISS_CACHE_TTL = int(os.environ.get("INGEST_MISS_CACHE_TTL", "1800"))  # 30 min
 # Server-side defense-in-depth limit per client IP (client also limits itself).
 RATE_LIMIT = int(os.environ.get("INGEST_RATE_LIMIT", "30"))  # requests / minute
 _rate = RateLimiter(RATE_LIMIT, window_seconds=60)
@@ -49,9 +51,9 @@ def _cache_get(key: str) -> dict | None:
     return None
 
 
-def _cache_put(key: str, payload: dict) -> None:
+def _cache_put(key: str, payload: dict, ttl: int = CACHE_TTL) -> None:
     with _cache_lock:
-        _search_cache[key] = (time.time() + CACHE_TTL, payload)
+        _search_cache[key] = (time.time() + ttl, payload)
 
 
 def extraction_to_dict(e: Extraction) -> dict:
@@ -135,7 +137,9 @@ class Handler(BaseHTTPRequestHandler):
         # No client 'url' override (SSRF guard) — pipeline finds it itself.
         result = find_merchant_offers(merchant, get_client())
         payload = result_to_dict(result)
-        _cache_put(key, payload)
+        # Cache a real hit for a day; a miss only briefly so it retries soon.
+        ttl = CACHE_TTL if payload.get("offers") else MISS_CACHE_TTL
+        _cache_put(key, payload, ttl)
         self._send(200, dict(payload, cached=False))
 
 

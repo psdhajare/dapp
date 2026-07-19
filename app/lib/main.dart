@@ -1,7 +1,9 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:engine/engine.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'analytics.dart';
@@ -335,6 +337,7 @@ class _RecommendTabState extends State<RecommendTab>
   bool _searchLoading = false;
   List<MerchantOfferView>? _merchantOffers;
   _Ranked? _offerWinner; // a held card with a %-offer at the merchant, if any
+  int _celebrateToken = 0; // bumped to fire the on-card crackers
   final Set<int> _revealed = {}; // reveal ids already animated this result
 
   @override
@@ -464,7 +467,11 @@ class _RecommendTabState extends State<RecommendTab>
     setState(() => _searchLoading = true);
     try {
       final data = await ingest.search(merchant);
-      await widget.dao.cacheSearch(key, data); // 24h TTL
+      // Cache a real hit for a day; a miss only briefly so it retries soon and
+      // a genuine offer is never hidden for long.
+      final hasOffers = (data['offers'] as List?)?.isNotEmpty ?? false;
+      await widget.dao.cacheSearch(key, data,
+          ttl: hasOffers ? const Duration(hours: 24) : const Duration(minutes: 30));
       await _applySearchPayload(data);
     } on IngestException catch (e) {
       if (mounted) {
@@ -525,9 +532,11 @@ class _RecommendTabState extends State<RecommendTab>
       setState(() {
         _merchantOffers = dedupedOffers;
         _offerWinner = offerWinner;
+        if (dedupedOffers.isNotEmpty) _celebrateToken++; // fire crackers
       });
       if (dedupedOffers.isNotEmpty) {
         widget.analytics.log(Analytics.liveOfferViewed);
+        HapticFeedback.mediumImpact(); // the "kick" when offers land
       }
     }
   }
@@ -932,6 +941,7 @@ class _RecommendTabState extends State<RecommendTab>
                   category: r.category,
                   winnerCaption:
                       _offerWinner != null ? 'at $_searchMerchant' : null,
+                  celebrateToken: _celebrateToken,
                 ),
               ),
               _Reveal(
@@ -975,24 +985,10 @@ class _RecommendTabState extends State<RecommendTab>
                     ),
                   ),
                 ),
-              if (r.offers.isNotEmpty) ...[
-                const SizedBox(height: 30),
-                _Reveal(
-                  order: 4,
-                revealed: _revealed,
-                  child: Text('PERKS FOR ${prettyCategory(r.category).toUpperCase()}',
-                      style: t.textTheme.labelSmall),
-                ),
-                const SizedBox(height: 12),
-                for (final (i, o) in r.offers.indexed)
-                  _Reveal(
-                    order: 5 + i,
-                revealed: _revealed,
-                    child: _OfferTile(offer: o, category: r.category),
-                  ),
-              ],
+              // Live merchant offers come BEFORE static perks — they're the
+              // reason the user searched, and their arrival is celebrated.
               if (_searchMerchant != null) ...[
-                const SizedBox(height: 30),
+                const SizedBox(height: 16),
                 Text('LIVE OFFERS AT ${_searchMerchant!.toUpperCase()}',
                     style: t.textTheme.labelSmall),
                 const SizedBox(height: 12),
@@ -1014,9 +1010,24 @@ class _RecommendTabState extends State<RecommendTab>
                   Text('No live card offers found here right now.',
                       style: t.textTheme.bodyMedium
                           ?.copyWith(color: scheme.onSurfaceVariant))
-                else
-                  for (final o in _merchantOffers ?? const <MerchantOfferView>[])
-                    _MerchantOfferTile(offer: o),
+                else if (_merchantOffers != null && _merchantOffers!.isNotEmpty)
+                  for (final o in _merchantOffers!) _MerchantOfferTile(offer: o),
+              ],
+              if (r.offers.isNotEmpty) ...[
+                const SizedBox(height: 30),
+                _Reveal(
+                  order: 4,
+                revealed: _revealed,
+                  child: Text('PERKS FOR ${prettyCategory(r.category).toUpperCase()}',
+                      style: t.textTheme.labelSmall),
+                ),
+                const SizedBox(height: 12),
+                for (final (i, o) in r.offers.indexed)
+                  _Reveal(
+                    order: 5 + i,
+                revealed: _revealed,
+                    child: _OfferTile(offer: o, category: r.category),
+                  ),
               ],
             ],
           ],
@@ -1025,6 +1036,112 @@ class _RecommendTabState extends State<RecommendTab>
       ),
     );
   }
+}
+
+/// Wraps the winning card and overlays a Diwali-style crackers burst — rockets
+/// rise from the base and explode into sparks — strictly clipped to the card.
+class _CelebratableCard extends StatelessWidget {
+  final AnimationController controller;
+  final Widget child;
+  const _CelebratableCard({required this.controller, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(kCardRadius),
+      child: Stack(
+        fit: StackFit.passthrough,
+        children: [
+          child,
+          Positioned.fill(
+            child: IgnorePointer(
+              child: AnimatedBuilder(
+                animation: controller,
+                builder: (_, __) {
+                  if (controller.value == 0 || controller.value == 1) {
+                    return const SizedBox.shrink();
+                  }
+                  return CustomPaint(painter: _CrackersPainter(controller.value));
+                },
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Diwali crackers: a few rockets shoot up, then burst into radiating sparks.
+/// All coordinates are within the card's box (painter is clipped to it).
+class _CrackersPainter extends CustomPainter {
+  final double t; // 0..1
+  _CrackersPainter(this.t);
+
+  static const _colors = [
+    Color(0xFFE8CE8F), // gold
+    Color(0xFFE08A2E), // amber
+    Color(0xFF8CBEA3), // mint
+    Color(0xFFEB6F92), // rose
+    Color(0xFFFFFFFF), // white spark
+  ];
+
+  // Rockets spread across the whole timeline so bursts keep popping ~3s.
+  // Each: horizontal position, launch delay (0..1), burst height, spark count.
+  static const _launches = [
+    (x: 0.30, delay: 0.00, burstY: 0.34, sparks: 12),
+    (x: 0.66, delay: 0.08, burstY: 0.24, sparks: 14),
+    (x: 0.82, delay: 0.16, burstY: 0.44, sparks: 10),
+    (x: 0.16, delay: 0.26, burstY: 0.40, sparks: 12),
+    (x: 0.50, delay: 0.36, burstY: 0.20, sparks: 16),
+    (x: 0.74, delay: 0.46, burstY: 0.36, sparks: 12),
+    (x: 0.24, delay: 0.56, burstY: 0.28, sparks: 12),
+    (x: 0.58, delay: 0.66, burstY: 0.46, sparks: 14),
+    (x: 0.88, delay: 0.74, burstY: 0.30, sparks: 10),
+  ];
+
+  static const _window = 0.26; // each rocket's rise+burst lifespan (of total)
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..style = PaintingStyle.fill;
+
+    for (var r = 0; r < _launches.length; r++) {
+      final l = _launches[r];
+      final lt = ((t - l.delay) / _window).clamp(0.0, 1.0);
+      if (lt <= 0 || lt >= 1) continue;
+      final bx = size.width * l.x;
+      final burstY = size.height * l.burstY;
+
+      if (lt < 0.4) {
+        // Rocket rising: a bright streak from the base to the burst point.
+        final p = lt / 0.4;
+        final y =
+            size.height - (size.height - burstY) * Curves.easeOut.transform(p);
+        paint.color = _colors[r % _colors.length].withValues(alpha: 0.9);
+        canvas.drawCircle(Offset(bx, y), 2.2, paint);
+        paint.color = _colors[r % _colors.length].withValues(alpha: 0.25);
+        canvas.drawRect(
+            Rect.fromLTWH(bx - 1, y, 2, (size.height - y) * 0.4), paint);
+      } else {
+        // Burst: sparks radiate outward, fade + fall.
+        final bp = (lt - 0.4) / 0.6; // 0..1 within the burst
+        final radius = 46 * Curves.easeOut.transform(bp);
+        for (var s = 0; s < l.sparks; s++) {
+          final a = (s / l.sparks) * 2 * math.pi;
+          final gravity = 26 * bp * bp;
+          final dx = bx + radius * math.cos(a);
+          final dy = burstY + radius * math.sin(a) + gravity;
+          paint.color =
+              _colors[(r + s) % _colors.length].withValues(alpha: 1 - bp);
+          canvas.drawCircle(Offset(dx, dy), 2.0 * (1 - bp * 0.5), paint);
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CrackersPainter old) => old.t != t;
 }
 
 /// Never show the internal token "general" — say "everyday spend" (v1.1 copy).
@@ -1263,16 +1380,31 @@ class _RankedDeck extends StatefulWidget {
   final List<_Ranked> ranked;
   final String category;
   final String? winnerCaption; // overrides "back on <category>" (e.g. offers)
+  final int celebrateToken; // bump to fire the on-card crackers once
   const _RankedDeck(
-      {required this.ranked, required this.category, this.winnerCaption});
+      {required this.ranked,
+      required this.category,
+      this.winnerCaption,
+      this.celebrateToken = 0});
 
   @override
   State<_RankedDeck> createState() => _RankedDeckState();
 }
 
-class _RankedDeckState extends State<_RankedDeck> {
+class _RankedDeckState extends State<_RankedDeck>
+    with SingleTickerProviderStateMixin {
   static const double _strip = 52;
   late List<_Ranked> _order = List.of(widget.ranked);
+
+  // Crackers burst on the winning card when live offers land.
+  late final AnimationController _celebrate = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 3000));
+
+  @override
+  void dispose() {
+    _celebrate.dispose();
+    super.dispose();
+  }
 
   @override
   void didUpdateWidget(_RankedDeck old) {
@@ -1284,6 +1416,10 @@ class _RankedDeckState extends State<_RankedDeck> {
     if (incoming.length != current.length ||
         !incoming.containsAll(current)) {
       _order = List.of(widget.ranked);
+    }
+    if (widget.celebrateToken != old.celebrateToken &&
+        widget.celebrateToken > 0) {
+      _celebrate.forward(from: 0);
     }
   }
 
@@ -1318,12 +1454,15 @@ class _RankedDeckState extends State<_RankedDeck> {
                 right: 8.0 * i,
                 height: winnerH,
                 child: i == 0
-                    ? CardVisual(
-                        card: _order.first.card,
-                        headline:
-                            '${(_order.first.rec.effectiveRate * 100).toStringAsFixed(2)}%',
-                        caption: widget.winnerCaption ??
-                            'back on ${prettyCategory(widget.category)}',
+                    ? _CelebratableCard(
+                        controller: _celebrate,
+                        child: CardVisual(
+                          card: _order.first.card,
+                          headline:
+                              '${(_order.first.rec.effectiveRate * 100).toStringAsFixed(2)}%',
+                          caption: widget.winnerCaption ??
+                              'back on ${prettyCategory(widget.category)}',
+                        ),
                       )
                     : GestureDetector(
                         onTap: () => _promote(i),

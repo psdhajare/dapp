@@ -65,11 +65,16 @@ class MerchantResult:
 _OFFER_HINTS = (
     "offer", "deal", "discount", "cashback", "lifestyle", "promo", "rewards",
 )
-# Kept small for latency: fewer pages + a tighter char budget mean a much
-# faster LLM pass. Pages are fetched concurrently.
-_MAX_PAGES = 2
-_PER_PAGE_CHARS = 5000
-_COMBINED_CHARS = 9000
+# Correctness over speed: missing a live offer defeats the app's purpose. The
+# result is cached ~24h, so this thorough pass runs only once per merchant per
+# day, and the best-card pick already shows instantly while offers load. So cast
+# a wide net: many top-ranked "deal" URLs are JS SPAs (e.g. aggregators) that
+# yield no server-side text, so fetch a large candidate pool concurrently and
+# keep the pages that actually return readable text, up to _MAX_PAGES.
+_MAX_CANDIDATES = 10
+_MAX_PAGES = 5
+_PER_PAGE_CHARS = 9000
+_COMBINED_CHARS = 24000
 _FETCH_TIMEOUT = 12  # seconds; a slow page shouldn't stall the whole search
 
 
@@ -86,9 +91,16 @@ def _rank_offer_urls(urls: list[str], merchant: str) -> list[str]:
 
 
 def _gather_urls(merchant: str) -> list[str]:
-    """Merge results from a couple of offer-focused queries, de-duped."""
+    """Merge results from several offer-focused queries, de-duped. More angles
+    raise recall so we don't miss the one page that lists the offer."""
     seen: list[str] = []
-    for q in (f'"{merchant}" credit card offer', f"{merchant} card discount deal"):
+    queries = (
+        f'"{merchant}" credit card offer',
+        f"{merchant} card discount deal",
+        f"{merchant} bank offer promotion",
+        f"{merchant} cashback credit card UAE",
+    )
+    for q in queries:
         try:
             for u in discover.search(q):
                 if u not in seen:
@@ -112,7 +124,7 @@ def find_merchant_offers(
     source_ref = url
     try:
         urls = [url] if url else \
-            _rank_offer_urls(_gather_urls(merchant), merchant)[:_MAX_PAGES]
+            _rank_offer_urls(_gather_urls(merchant), merchant)[:_MAX_CANDIDATES]
         source_ref = urls[0] if urls else None
 
         def _fetch(u: str) -> str:
@@ -121,12 +133,18 @@ def find_merchant_offers(
             except Exception:
                 return ""
 
-        # Fetch candidate pages in parallel so total time ~= the slowest page,
-        # not the sum. Preserve rank order in the combined text.
+        # Fetch candidates in parallel; keep only pages that actually yield text
+        # (skips JS-only SPAs), in rank order, up to _MAX_PAGES. Point source_ref
+        # at the first readable page so it reflects what was actually extracted.
         with ThreadPoolExecutor(max_workers=len(urls) or 1) as pool:
-            for t in pool.map(_fetch, urls):
-                if t.strip():
-                    texts.append(t[:_PER_PAGE_CHARS])
+            for u, t in zip(urls, pool.map(_fetch, urls)):
+                if not t.strip():
+                    continue
+                if not texts:
+                    source_ref = u
+                texts.append(t[:_PER_PAGE_CHARS])
+                if len(texts) >= _MAX_PAGES:
+                    break
     except Exception:  # network/search failure -> best card still works, no offers
         return MerchantResult(merchant=merchant, category=category, offers=[])
 

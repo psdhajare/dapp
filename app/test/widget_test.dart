@@ -205,7 +205,12 @@ void main() {
     await tester.enterText(
         find.byKey(const Key('merchant_search')), 'Glossy Hair Salon');
     await tester.testTextInput.receiveAction(TextInputAction.search);
-    await tester.pumpAndSettle();
+    // Bounded pumps: the loading spinner + one-shot on-card crackers are
+    // perpetual/animated, so pumpAndSettle would time out. Pump enough for the
+    // mocked network + DB + the ~1.5s celebration to settle.
+    for (var i = 0; i < 25; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
 
     // Best-card header reflects the searched merchant.
     expect(find.textContaining('Best at Glossy Hair Salon'), findsOneWidget);
@@ -224,7 +229,9 @@ void main() {
 
     await tester.enterText(find.byKey(const Key('merchant_search')), 'Zzxq Place');
     await tester.testTextInput.receiveAction(TextInputAction.search);
-    await tester.pumpAndSettle();
+    for (var i = 0; i < 25; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
 
     expect(find.textContaining('No live card offers'), findsOneWidget);
   });
