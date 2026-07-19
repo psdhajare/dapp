@@ -7,6 +7,7 @@ contain words from the card name (bank domains beat aggregators).
 from __future__ import annotations
 
 import re
+import time
 import urllib.parse
 from html.parser import HTMLParser
 
@@ -19,16 +20,31 @@ MAX_DOC_CHARS = 40_000
 _NOISE_WORDS = {"credit", "card", "cashback", "cash", "back", "rewards", "the", "bank"}
 
 
-def search(query: str, limit: int = 10) -> list[str]:
-    """DuckDuckGo HTML search -> result URLs (best-effort, keyless)."""
-    resp = requests.get(
-        "https://html.duckduckgo.com/html/",
-        params={"q": query},
-        headers=HEADERS,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return parse_search_results(resp.text)[:limit]
+def search(query: str, limit: int = 10, retries: int = 2) -> list[str]:
+    """DuckDuckGo HTML search -> result URLs (best-effort, keyless).
+
+    DDG intermittently returns an empty page when hit repeatedly from one IP
+    (as happens during a single add-card that runs several queries). Retry a
+    couple of times with a short backoff before giving up.
+    """
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                headers=HEADERS,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            urls = parse_search_results(resp.text)[:limit]
+            if urls:
+                return urls
+        except Exception:
+            if attempt == retries:
+                raise
+        if attempt < retries:
+            time.sleep(1.2 * (attempt + 1))  # brief backoff before retry
+    return []
 
 
 def parse_search_results(html: str) -> list[str]:

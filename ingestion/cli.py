@@ -74,11 +74,8 @@ def _fees_text(card_name: str, limit: int = 16000, country: str = "") -> str:
     """
     c = f" {country}" if country else ""
     queries = (
-        f"{card_name} MITC rate of interest{c}",
-        f"{card_name} interest rate per month{c}",
-        f"{card_name} fees and charges{c}",
-        f"{card_name} schedule of charges{c}",
-        f"{card_name} key facts statement{c}",
+        f"{card_name} interest rate fees{c}",
+        f"{card_name} MITC schedule of charges{c}",
     )
     seen: list[str] = []
     for q in queries:
