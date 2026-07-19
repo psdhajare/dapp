@@ -6,44 +6,109 @@ contain words from the card name (bank domains beat aggregators).
 
 from __future__ import annotations
 
+import os
 import re
-import time
 import urllib.parse
 from html.parser import HTMLParser
 
 import requests
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (personal card-rules ingestion tool)"}
+# A real browser UA — search engines block unusual/custom agents outright.
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 MAX_DOC_CHARS = 40_000
 
 # Generic words that don't identify the bank.
 _NOISE_WORDS = {"credit", "card", "cashback", "cash", "back", "rewards", "the", "bank"}
 
 
-def search(query: str, limit: int = 10, retries: int = 2) -> list[str]:
-    """DuckDuckGo HTML search -> result URLs (best-effort, keyless).
+def _brave(query: str) -> list[str] | None:
+    """Brave Search API — reliable from a server IP. Free tier ~2000/mo.
+    Set BRAVE_API_KEY to enable. Returns None (skip) when not configured."""
+    key = os.environ.get("BRAVE_API_KEY")
+    if not key:
+        return None
+    resp = requests.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        params={"q": query, "count": 10},
+        headers={"X-Subscription-Token": key, "Accept": "application/json"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return [r["url"] for r in resp.json().get("web", {}).get("results", [])]
 
-    DDG intermittently returns an empty page when hit repeatedly from one IP
-    (as happens during a single add-card that runs several queries). Retry a
-    couple of times with a short backoff before giving up.
-    """
-    for attempt in range(retries + 1):
+
+def _serper(query: str) -> list[str] | None:
+    """Serper.dev (Google results). Set SERPER_API_KEY to enable."""
+    key = os.environ.get("SERPER_API_KEY")
+    if not key:
+        return None
+    resp = requests.post(
+        "https://google.serper.dev/search",
+        json={"q": query},
+        headers={"X-API-KEY": key, "Content-Type": "application/json"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return [r["link"] for r in resp.json().get("organic", []) if r.get("link")]
+
+
+def _ddg(query: str) -> list[str]:
+    resp = requests.get("https://html.duckduckgo.com/html/",
+                        params={"q": query}, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    return parse_search_results(resp.text)
+
+
+def _bing(query: str) -> list[str]:
+    resp = requests.get("https://www.bing.com/search",
+                        params={"q": query}, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    urls: list[str] = []
+    for m in re.finditer(r'<h2>\s*<a[^>]+href="(https?://[^"]+)"', resp.text):
+        u = m.group(1)
+        if "bing.com" not in u and u not in urls:
+            urls.append(u)
+    return urls
+
+
+def _mojeek(query: str) -> list[str]:
+    resp = requests.get("https://www.mojeek.com/search",
+                        params={"q": query}, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    urls, seen = [], set()
+    for m in re.finditer(r'<a[^>]+class="[^"]*title[^"]*"[^>]+href="(https?://[^"]+)"',
+                         resp.text):
+        u = m.group(1)
+        if u not in seen:
+            seen.add(u)
+            urls.append(u)
+    return urls
+
+
+# Tried in order; first engine that returns results wins. Keyed APIs (reliable
+# from a server IP) go first when configured; keyless scrapers are the fallback.
+_ENGINES = (_brave, _serper, _ddg, _bing, _mojeek)
+
+
+def search(query: str, limit: int = 10) -> list[str]:
+    """Web search with provider fallback. Prefers a keyed API (BRAVE_API_KEY /
+    SERPER_API_KEY) when set; otherwise scrapes DDG/Bing/Mojeek."""
+    last_exc: Exception | None = None
+    for engine in _ENGINES:
         try:
-            resp = requests.get(
-                "https://html.duckduckgo.com/html/",
-                params={"q": query},
-                headers=HEADERS,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            urls = parse_search_results(resp.text)[:limit]
+            urls = engine(query)
             if urls:
-                return urls
-        except Exception:
-            if attempt == retries:
-                raise
-        if attempt < retries:
-            time.sleep(1.2 * (attempt + 1))  # brief backoff before retry
+                return urls[:limit]
+        except Exception as e:  # engine blocked/errored -> try the next
+            last_exc = e
+            continue
+    if last_exc:
+        raise last_exc
     return []
 
 
