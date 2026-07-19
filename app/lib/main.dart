@@ -52,15 +52,18 @@ const simulations = <String, (IconData, String)>{
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  const apiKey = String.fromEnvironment('PLACES_API_KEY');
+  const tomtomKey = String.fromEnvironment('TOMTOM_API_KEY');
+  const placesKey = String.fromEnvironment('PLACES_API_KEY');
 
   final db = await openAppDb(resolveDbFactory());
   final dao = CardDao(db);
   final poiMap = await dao.loadPoiMap();
-  // Keyless OpenStreetMap by default; Google Places only if a key is provided.
-  final VenueLookup lookup = apiKey.isEmpty
-      ? OverpassLookup()
-      : GooglePlacesLookup(apiKey: apiKey);
+  // Prefer TomTom (best Gulf POI coverage), then Google, else keyless OSM.
+  final VenueLookup lookup = tomtomKey.isNotEmpty
+      ? TomTomLookup(apiKey: tomtomKey)
+      : placesKey.isNotEmpty
+          ? GooglePlacesLookup(apiKey: placesKey)
+          : OverpassLookup();
   final venue = VenueCategoryService(lookup: lookup, poiMap: poiMap);
   final ingest = IngestService(
     endpoint: Uri.parse(const String.fromEnvironment(

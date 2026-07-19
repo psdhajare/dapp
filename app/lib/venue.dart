@@ -67,6 +67,61 @@ class GooglePlacesLookup implements VenueLookup {
   }
 }
 
+/// Venue lookup via TomTom Nearby Search (own commercial POI data — better
+/// coverage than OSM in the Gulf). Maps TomTom categories to our poi_category_map
+/// vocabulary, nearest first.
+class TomTomLookup implements VenueLookup {
+  final String apiKey;
+  final http.Client client;
+  TomTomLookup({required this.apiKey, http.Client? client})
+      : client = client ?? http.Client();
+
+  // TomTom category text -> a token present in poi_category_map.
+  static String? _token(String text) {
+    bool has(List<String> ks) => ks.any(text.contains);
+    if (has(['petrol', 'fuel', 'gas station'])) return 'fuel';
+    if (has(['cinema', 'movie', 'theater', 'theatre'])) return 'cinema';
+    if (has(['pharmacy', 'chemist', 'drug', 'clinic', 'hospital', 'medical',
+        'doctor', 'dentist'])) return 'pharmacy';
+    if (has(['salon', 'spa', 'beauty', 'hair'])) return 'hairdresser';
+    if (has(['convenience'])) return 'convenience';
+    if (has(['market', 'supermarket', 'grocery', 'hypermarket'])) {
+      return 'supermarket';
+    }
+    if (has(['restaurant', 'cafe', 'coffee', 'pub', 'bar', 'food', 'dining',
+        'bistro', 'bakery', 'eatery'])) return 'restaurant';
+    return null;
+  }
+
+  @override
+  Future<List<String>> nearbyTypes(double lat, double lng) async {
+    if (apiKey.isEmpty) return const [];
+    final uri = Uri.parse(
+      'https://api.tomtom.com/search/2/nearbySearch/.json'
+      '?lat=$lat&lon=$lng&radius=150&limit=20&key=$apiKey',
+    );
+    try {
+      final resp = await client.get(uri);
+      if (resp.statusCode != 200) return const [];
+      final results = (jsonDecode(resp.body)
+          as Map<String, dynamic>)['results'] as List<dynamic>? ?? const [];
+      final out = <String>[]; // results are distance-sorted (nearest first)
+      for (final r in results.cast<Map<String, dynamic>>()) {
+        final poi = r['poi'] as Map<String, dynamic>?;
+        if (poi == null) continue;
+        final cats = (poi['categories'] as List<dynamic>? ?? const [])
+            .join(' ')
+            .toLowerCase();
+        final tok = _token(cats);
+        if (tok != null) out.add(tok);
+      }
+      return out;
+    } catch (_) {
+      return const [];
+    }
+  }
+}
+
 /// Keyless venue lookup via OpenStreetMap's Overpass API. Returns the OSM tag
 /// values (e.g. "supermarket", "cinema", "restaurant") of nearby POIs, nearest
 /// first, mapped to categories by poi_category_map. Free, no API key.
