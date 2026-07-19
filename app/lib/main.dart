@@ -1,16 +1,17 @@
 import 'dart:ui' as ui;
 
 import 'package:engine/engine.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 
 import 'app_db.dart';
 import 'dao.dart';
+import 'db_factory.dart';
 import 'ingest_service.dart';
+import 'input_guard.dart';
+import 'merchant_category.dart';
 import 'profile_store.dart';
+import 'rate_limiter.dart';
 import 'theme/concierge_theme.dart';
 import 'venue.dart';
 
@@ -37,14 +38,7 @@ Future<void> main() async {
 
   const apiKey = String.fromEnvironment('PLACES_API_KEY');
 
-  final DatabaseFactory factory;
-  if (kIsWeb) {
-    factory = databaseFactoryFfiWeb;
-  } else {
-    sqfliteFfiInit();
-    factory = databaseFactoryFfi;
-  }
-  final db = await openAppDb(factory);
+  final db = await openAppDb(resolveDbFactory());
   final dao = CardDao(db);
   final poiMap = await dao.loadPoiMap();
   final venue = VenueCategoryService(
@@ -148,6 +142,7 @@ class _RootScreenState extends State<RootScreen> {
                   venue: widget.venue,
                   locationFn: widget.locationFn,
                   profile: widget.profile,
+                  ingest: widget.ingest,
                 )
               : WalletTab(
                   dao: widget.dao,
@@ -229,6 +224,7 @@ class RecommendTab extends StatefulWidget {
   final VenueCategoryService venue;
   final LocationFn locationFn;
   final ProfileStore profile;
+  final IngestService? ingest;
 
   const RecommendTab({
     super.key,
@@ -236,6 +232,7 @@ class RecommendTab extends StatefulWidget {
     required this.venue,
     required this.locationFn,
     required this.profile,
+    this.ingest,
   });
 
   @override
@@ -249,14 +246,98 @@ class _RecommendTabState extends State<RecommendTab> {
   bool _loading = false;
   bool _locating = false;
 
+  final _searchCtl = TextEditingController();
+  String? _searchMerchant; // the queried merchant, when in search mode
+  bool _searchLoading = false;
+  List<MerchantOfferView>? _merchantOffers;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _recommend('general'));
   }
 
+  @override
+  void dispose() {
+    _searchCtl.dispose();
+    super.dispose();
+  }
+
   Future<void> refreshAfterWalletChange() async {
     await _recommend(_result?.category ?? 'general');
+  }
+
+  /// Search a specific merchant: instant best card from the offline keyword
+  /// category, then live offer discovery + refined category from the backend.
+  Future<void> _search(String raw) async {
+    FocusScope.of(context).unfocus();
+    // 1) Validate/sanitize before anything leaves the device.
+    final String merchant;
+    try {
+      merchant = sanitizeQuery(raw);
+    } on InputGuardException catch (e) {
+      _toast(e.message);
+      return;
+    }
+    // 2) Client rate limit (10/min, shared with add-card).
+    if (!queryRateLimiter.tryAcquire()) {
+      final secs = queryRateLimiter.retryAfter().inSeconds;
+      _toast('Too many searches — try again in ${secs}s.');
+      return;
+    }
+    setState(() {
+      _selected = 'search';
+      _searchMerchant = merchant;
+      _merchantOffers = null;
+      _loading = true;
+    });
+    // Instant best-card from the offline category.
+    await _recommend(categoryForMerchant(merchant));
+    setState(() => _loading = false);
+
+    final ingest = widget.ingest;
+    if (ingest == null) return;
+    setState(() => _searchLoading = true);
+    try {
+      final data = await ingest.search(merchant);
+      final refined = data['category'] as String?;
+      if (refined != null && refined != _result?.category) {
+        await _recommend(refined); // re-rank on the refined category
+      }
+      final held = await widget.dao.allCards();
+      final heldNames = held
+          .where((c) => c.held)
+          .map((c) => '${c.issuer} ${c.name}'.toLowerCase())
+          .toList();
+      final offers = <MerchantOfferView>[
+        for (final o in (data['offers'] as List? ?? []))
+          MerchantOfferView.fromJson(
+              (o as Map).cast<String, dynamic>(), heldNames),
+      ];
+      if (mounted) setState(() => _merchantOffers = offers);
+    } on IngestException catch (e) {
+      // Surface server-side rejections (rate limit / validation) too.
+      if (mounted) {
+        setState(() => _merchantOffers = const []);
+        _toast(e.message);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _merchantOffers = const []);
+    } finally {
+      if (mounted) setState(() => _searchLoading = false);
+    }
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    final m = ScaffoldMessenger.of(context);
+    m.clearSnackBars();
+    m.showSnackBar(SnackBar(
+      content: Text(message),
+      duration: const Duration(seconds: 3),
+      margin: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+    ));
+    Future.delayed(const Duration(seconds: 3), m.hideCurrentSnackBar);
   }
 
   Future<void> _useLocation() async {
@@ -266,6 +347,8 @@ class _RecommendTabState extends State<RecommendTab> {
       _locating = true;
       _status = 'Finding where you are…';
       _result = null;
+      _searchMerchant = null;
+      _merchantOffers = null;
     });
     try {
       final (lat, lng) = await widget.locationFn();
@@ -286,6 +369,8 @@ class _RecommendTabState extends State<RecommendTab> {
       _selected = label;
       _loading = true;
       _result = null;
+      _searchMerchant = null;
+      _merchantOffers = null;
     });
     try {
       await _recommend(category);
@@ -359,7 +444,27 @@ class _RecommendTabState extends State<RecommendTab> {
                 ],
               ),
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 16),
+            TextField(
+              key: const Key('merchant_search'),
+              controller: _searchCtl,
+              textInputAction: TextInputAction.search,
+              onSubmitted: _search,
+              decoration: InputDecoration(
+                hintText: 'Search a shop, place, or website',
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: _searchLoading
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2)),
+                      )
+                    : null,
+              ),
+            ),
+            const SizedBox(height: 14),
             _VenueChips(
               selected: _selected,
               enabled: !_loading,
@@ -390,9 +495,11 @@ class _RecommendTabState extends State<RecommendTab> {
               _Reveal(
                 order: 0,
                 child: Text(
-                  _selected == null
-                      ? 'Best for everyday spend'
-                      : 'Best for ${r.category}',
+                  _searchMerchant != null
+                      ? 'Best at $_searchMerchant'
+                      : _selected == null
+                          ? 'Best for everyday spend'
+                          : 'Best for ${r.category}',
                   style: t.textTheme.titleMedium
                       ?.copyWith(color: scheme.onSurfaceVariant),
                 ),
@@ -441,6 +548,33 @@ class _RecommendTabState extends State<RecommendTab> {
                     order: 5 + i,
                     child: _OfferTile(offer: o, category: r.category),
                   ),
+              ],
+              if (_searchMerchant != null) ...[
+                const SizedBox(height: 30),
+                Text('LIVE OFFERS AT ${_searchMerchant!.toUpperCase()}',
+                    style: t.textTheme.labelSmall),
+                const SizedBox(height: 12),
+                if (_searchLoading && _merchantOffers == null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: Row(children: [
+                      const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2)),
+                      const SizedBox(width: 12),
+                      Text('Checking for current offers…',
+                          style: t.textTheme.bodyMedium
+                              ?.copyWith(color: scheme.onSurfaceVariant)),
+                    ]),
+                  )
+                else if (_merchantOffers != null && _merchantOffers!.isEmpty)
+                  Text('No live card offers found here right now.',
+                      style: t.textTheme.bodyMedium
+                          ?.copyWith(color: scheme.onSurfaceVariant))
+                else
+                  for (final o in _merchantOffers ?? const <MerchantOfferView>[])
+                    _MerchantOfferTile(offer: o),
               ],
             ],
           ],
@@ -1095,6 +1229,156 @@ class _OfferTile extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
+// Live merchant offers (from /search)
+// ---------------------------------------------------------------------------
+
+class MerchantOfferView {
+  final String title;
+  final String? description;
+  final String? cardHint;
+  final String? validUntil;
+  final bool held; // the offer's card is in the user's wallet
+
+  const MerchantOfferView({
+    required this.title,
+    this.description,
+    this.cardHint,
+    this.validUntil,
+    this.held = false,
+  });
+
+  factory MerchantOfferView.fromJson(
+      Map<String, dynamic> json, List<String> heldNames) {
+    final hint = (json['card_hint'] as String?)?.trim();
+    final held = hint != null && hint.isNotEmpty && _matchesHeld(hint, heldNames);
+    return MerchantOfferView(
+      title: (json['title'] as String?)?.trim() ?? '',
+      description: json['description'] as String?,
+      cardHint: (hint != null && hint.isEmpty) ? null : hint,
+      validUntil: json['valid_until'] as String?,
+      held: held,
+    );
+  }
+
+  static bool _matchesHeld(String hint, List<String> heldNames) {
+    final words =
+        hint.toLowerCase().split(RegExp(r'\W+')).where((w) => w.length >= 4);
+    return heldNames.any((n) => words.any(n.contains));
+  }
+}
+
+class _MerchantOfferTile extends StatelessWidget {
+  final MerchantOfferView offer;
+  const _MerchantOfferTile({required this.offer});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final scheme = t.colorScheme;
+    return Container(
+      key: const Key('merchant_offer'),
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: offer.held ? Border.all(color: scheme.primary, width: 1.5) : null,
+        boxShadow: [
+          BoxShadow(
+            color: (t.brightness == Brightness.dark
+                    ? Colors.black
+                    : const Color(0xFF272219))
+                .withValues(alpha: t.brightness == Brightness.dark ? 0.8 : 0.5),
+            blurRadius: 18,
+            spreadRadius: -14,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(offer.title,
+              style: t.textTheme.titleSmall,
+              maxLines: 2, overflow: TextOverflow.ellipsis),
+          if (offer.description != null && offer.description!.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Text(offer.description!,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: t.textTheme.bodyMedium?.copyWith(
+                    fontSize: 12, height: 1.35, color: scheme.onSurfaceVariant)),
+          ],
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (offer.cardHint != null)
+                _Badge(
+                  text: offer.cardHint!,
+                  color: scheme.onSurfaceVariant,
+                  background: scheme.onSurface.withValues(alpha: 0.06),
+                ),
+              if (offer.held)
+                _Badge(
+                  text: 'In your wallet',
+                  color: scheme.onPrimary,
+                  background: scheme.primary,
+                ),
+              if (offer.validUntil != null && offer.validUntil!.isNotEmpty)
+                _Badge(
+                  text: 'Until ${offer.validUntil}',
+                  color: t.extension<ConciergeColors>()!.capInk,
+                  background: t.extension<ConciergeColors>()!.capBg,
+                  icon: Icons.schedule,
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Badge extends StatelessWidget {
+  final String text;
+  final Color color;
+  final Color background;
+  final IconData? icon;
+  const _Badge({
+    required this.text,
+    required this.color,
+    required this.background,
+    this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 12, color: color),
+            const SizedBox(width: 4),
+          ],
+          Text(text,
+              style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.w600, color: color)),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Empty states
 // ---------------------------------------------------------------------------
 
@@ -1533,7 +1817,7 @@ class _WalletTabState extends State<WalletTab> {
     if (mounted) {
       final messenger = ScaffoldMessenger.of(context);
       messenger.clearSnackBars();
-      messenger.showSnackBar(SnackBar(
+      final controller = messenger.showSnackBar(SnackBar(
         content: Text('Removed ${card.name}'),
         duration: const Duration(seconds: 3),
         margin: const EdgeInsets.fromLTRB(20, 0, 20, 12),
@@ -1546,6 +1830,12 @@ class _WalletTabState extends State<WalletTab> {
           },
         ),
       ));
+      // Guaranteed dismissal: Flutter suppresses the built-in auto-dismiss
+      // timer when accessibility navigation is active (seen on iOS), so hide
+      // it ourselves. No-op if the user already tapped Undo.
+      Future.delayed(const Duration(seconds: 3), () {
+        controller.close();
+      });
     }
   }
 
@@ -1733,11 +2023,23 @@ class _AddCardSheetState extends State<_AddCardSheet> {
   }
 
   Future<void> _submit() async {
-    final name = _name.text.trim();
     final ingest = widget.ingest;
-    if (name.isEmpty) return;
+    // Validate/sanitize the card name before it leaves the device.
+    final String name;
+    try {
+      name = sanitizeQuery(_name.text);
+    } on InputGuardException catch (e) {
+      setState(() => _error = e.message);
+      return;
+    }
     if (ingest == null) {
       setState(() => _error = 'Ingestion service not configured.');
+      return;
+    }
+    // Client rate limit (10/min, shared with search).
+    if (!queryRateLimiter.tryAcquire()) {
+      final secs = queryRateLimiter.retryAfter().inSeconds;
+      setState(() => _error = 'Too many requests — try again in ${secs}s.');
       return;
     }
     setState(() {

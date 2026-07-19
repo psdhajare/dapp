@@ -7,7 +7,7 @@ import 'package:sqflite_common/sqlite_api.dart';
 
 /// Bump whenever bundled schema/seed data changes: existing installs drop and
 /// rebuild their local copy on next launch.
-const _dbVersion = 6;
+const _dbVersion = 8;
 
 Future<Database> openAppDb(DatabaseFactory factory) async {
   return factory.openDatabase(
@@ -42,38 +42,58 @@ Future<void> _runScript(Database db, String asset) async {
   }
 }
 
-/// Split a SQL file into executable statements: drop line comments and PRAGMAs
-/// (PRAGMA returns a row that the web worker can't marshal), then split on ';'
-/// — but only outside string literals, so quoted text may contain semicolons.
 Iterable<String> _statements(String sql) => splitSqlStatements(sql);
 
+/// Split a SQL script into executable statements. Char-level tokenizer so it
+/// handles `--` comments *anywhere* (including inline, e.g. after a column with
+/// an apostrophe in the comment), single-quoted strings with `''` escapes, and
+/// semicolons inside string literals. PRAGMA statements are dropped (they
+/// return a row the web worker can't marshal, and aren't needed at build time).
 List<String> splitSqlStatements(String sql) {
-  final noComments = sql
-      .split('\n')
-      .where((l) {
-        final t = l.trimLeft();
-        return !t.startsWith('--') && !t.toUpperCase().startsWith('PRAGMA');
-      })
-      .join('\n');
-
   final statements = <String>[];
-  final current = StringBuffer();
+  final cur = StringBuffer();
   var inString = false;
-  for (var i = 0; i < noComments.length; i++) {
-    final ch = noComments[i];
+  var inComment = false;
+
+  for (var i = 0; i < sql.length; i++) {
+    final ch = sql[i];
+
+    if (inComment) {
+      if (ch == '\n') {
+        inComment = false;
+        cur.write(ch);
+      }
+      continue;
+    }
+    if (inString) {
+      cur.write(ch);
+      if (ch == "'") inString = false; // '' escape re-opens on the next char
+      continue;
+    }
+    if (ch == '-' && i + 1 < sql.length && sql[i + 1] == '-') {
+      inComment = true;
+      i++;
+      continue;
+    }
     if (ch == "'") {
-      // In SQL, '' inside a string is an escaped quote, not a terminator.
-      inString = !inString;
+      inString = true;
+      cur.write(ch);
+      continue;
     }
-    if (ch == ';' && !inString) {
-      final stmt = current.toString().trim();
-      if (stmt.isNotEmpty) statements.add(stmt);
-      current.clear();
-    } else {
-      current.write(ch);
+    if (ch == ';') {
+      _addStatement(statements, cur.toString());
+      cur.clear();
+      continue;
     }
+    cur.write(ch);
   }
-  final last = current.toString().trim();
-  if (last.isNotEmpty) statements.add(last);
+  _addStatement(statements, cur.toString());
   return statements;
+}
+
+void _addStatement(List<String> out, String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return;
+  if (s.toUpperCase().startsWith('PRAGMA')) return;
+  out.add(s);
 }

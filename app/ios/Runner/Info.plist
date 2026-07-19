@@ -7,7 +7,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Bestcard</string>
+	<string>Best Card</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Best Card uses your location to detect the venue type and recommend the best card to pay with.</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

@@ -28,5 +28,17 @@ void main() {
       expect(stmts, hasLength(1));
       expect(stmts.first, startsWith('CREATE TABLE'));
     });
+
+    test('inline comment with an apostrophe does not swallow later statements',
+        () {
+      // Regression: "-- in the card's currency" flipped the string state and
+      // ate every following semicolon on native sqflite.
+      final stmts = splitSqlStatements(
+          "CREATE TABLE a (v REAL  -- in the card's currency\n);\n"
+          "CREATE TABLE b (x);\nCREATE TABLE c (y);");
+      expect(stmts, hasLength(3));
+      expect(stmts[1], startsWith('CREATE TABLE b'));
+      expect(stmts[2], startsWith('CREATE TABLE c'));
+    });
   });
 }

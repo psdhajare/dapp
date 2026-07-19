@@ -39,7 +39,7 @@ def test_foreign_key_enforced():
 def test_categories_seeded_by_schema():
     db = fresh_db()
     count = db.conn.execute("SELECT COUNT(*) c FROM categories").fetchone()["c"]
-    assert count == 9
+    assert count == 11
 
 
 def test_network_check_constraint():

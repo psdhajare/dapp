@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 VALID_CATEGORIES = {
     "dining", "grocery", "fuel", "travel", "transit",
-    "online", "utilities", "entertainment", "general",
+    "online", "utilities", "entertainment", "beauty", "health", "general",
 }
 VALID_UNITS = {"cashback_pct", "points_per_unit"}
 VALID_CAP_PERIODS = {"none", "monthly", "quarterly", "yearly"}

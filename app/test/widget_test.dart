@@ -2,6 +2,7 @@ import 'package:bestcard/dao.dart';
 import 'package:bestcard/ingest_service.dart';
 import 'package:bestcard/main.dart';
 import 'package:bestcard/profile_store.dart';
+import 'package:bestcard/rate_limiter.dart';
 import 'package:bestcard/venue.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -18,6 +19,20 @@ IngestService fakeIngest(String responseBody, {int status = 200}) {
     endpoint: Uri.parse('http://fake/ingest'),
     client: MockClient((_) async => http.Response(responseBody, status,
         headers: {'content-type': 'application/json'})),
+  );
+}
+
+/// Ingest service that routes /ingest and /search to different canned bodies.
+IngestService fakeRouted({String? ingestBody, String? searchBody}) {
+  return IngestService(
+    endpoint: Uri.parse('http://fake/ingest'),
+    client: MockClient((req) async {
+      final body = req.url.path == '/search'
+          ? (searchBody ?? '{"category":"general","offers":[]}')
+          : (ingestBody ?? '{}');
+      return http.Response(body, 200,
+          headers: {'content-type': 'application/json'});
+    }),
   );
 }
 
@@ -51,6 +66,34 @@ Future<BestCardApp> buildApp({
 }
 
 void main() {
+  setUp(queryRateLimiter.reset); // isolate the shared limiter per test
+
+  testWidgets('malicious merchant search is blocked client-side (no backend call)',
+      (tester) async {
+    var backendCalls = 0;
+    final ingest = IngestService(
+      endpoint: Uri.parse('http://fake/ingest'),
+      client: MockClient((req) async {
+        backendCalls++;
+        return http.Response('{"category":"general","offers":[]}', 200,
+            headers: {'content-type': 'application/json'});
+      }),
+    );
+    await tester.pumpWidget(await buildApp(ingest: ingest));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+        find.byKey(const Key('merchant_search')), "'; DROP TABLE cards;--");
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pump(); // build the error toast (avoid pumpAndSettle: toast
+    await tester.pump(const Duration(milliseconds: 400)); // has lingering timers
+
+    expect(backendCalls, 0);                    // never left the device
+    expect(find.textContaining('unsafe'), findsOneWidget); // error shown
+
+    await tester.pump(const Duration(seconds: 4)); // flush toast timers
+  });
+
   testWidgets('location flow shows issuer and card name plus cap flag',
       (tester) async {
     await tester.pumpWidget(await buildApp(venueTypes: ['supermarket']));
@@ -138,6 +181,44 @@ void main() {
 
     expect(find.byKey(const Key('add_card_error')), findsOneWidget);
     expect(find.textContaining('no search results'), findsOneWidget);
+  });
+
+  testWidgets('search a merchant: keyword category + live offers with badges',
+      (tester) async {
+    const searchJson = '''
+      {"merchant":"Glossy Hair Salon","category":"beauty","cached":false,
+       "offers":[
+         {"title":"20% off hair services","description":"Weekends",
+          "card_hint":"Emirates NBD","valid_until":"31 Dec 2026"}]}''';
+    await tester.pumpWidget(
+        await buildApp(ingest: fakeRouted(searchBody: searchJson)));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+        find.byKey(const Key('merchant_search')), 'Glossy Hair Salon');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    // Best-card header reflects the searched merchant.
+    expect(find.textContaining('Best at Glossy Hair Salon'), findsOneWidget);
+    // Live offer rendered with limited-time + wallet badges.
+    expect(find.byKey(const Key('merchant_offer')), findsOneWidget);
+    expect(find.text('20% off hair services'), findsOneWidget);
+    expect(find.textContaining('Until 31 Dec 2026'), findsOneWidget);
+    expect(find.text('In your wallet'), findsOneWidget); // Emirates NBD held
+  });
+
+  testWidgets('search with no offers shows empty message', (tester) async {
+    await tester.pumpWidget(await buildApp(
+        ingest: fakeRouted(
+            searchBody: '{"category":"beauty","offers":[],"cached":false}')));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const Key('merchant_search')), 'Zzxq Place');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('No live card offers'), findsOneWidget);
   });
 
   testWidgets('profile: set name and switch theme to dark', (tester) async {

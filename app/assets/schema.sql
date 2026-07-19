@@ -12,7 +12,8 @@ CREATE TABLE categories (
 
 INSERT INTO categories (name) VALUES
     ('dining'), ('grocery'), ('fuel'), ('travel'), ('transit'),
-    ('online'), ('utilities'), ('entertainment'), ('general');
+    ('online'), ('utilities'), ('entertainment'), ('beauty'), ('health'),
+    ('general');
 
 CREATE TABLE cards (
     id              TEXT PRIMARY KEY,
@@ -71,7 +72,15 @@ INSERT INTO poi_category_map (places_type, category) VALUES
     ('lodging', 'travel'),
     ('train_station', 'transit'),
     ('subway_station', 'transit'),
-    ('movie_theater', 'entertainment');
+    ('movie_theater', 'entertainment'),
+    ('beauty_salon', 'beauty'),
+    ('hair_care', 'beauty'),
+    ('spa', 'beauty'),
+    ('pharmacy', 'health'),
+    ('drugstore', 'health'),
+    ('doctor', 'health'),
+    ('hospital', 'health'),
+    ('dentist', 'health');
 
 -- Cards the user actually holds (the "wallet").
 CREATE TABLE user_cards (

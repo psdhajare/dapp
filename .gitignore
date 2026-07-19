@@ -34,3 +34,6 @@ engine/pubspec.lock
 .wrangler/
 .DS_Store
 *.log
+
+# Xcode backups
+*.pbxproj.bak

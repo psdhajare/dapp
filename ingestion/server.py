@@ -4,25 +4,54 @@ Holds the DeepSeek key; the app stays offline except when adding a card.
 
     python3 -m ingestion.server        # listens on 0.0.0.0:8765
     POST /ingest {"card": "Card Name", "url": "optional doc url"}
+    POST /search {"merchant": "Name"}  # category + live card offers (cached ~24h)
     GET  /health                       # readiness probe
 
 Config via env: INGEST_HOST (default 0.0.0.0), INGEST_PORT (default 8765),
-INGEST_DB (default db/cards.db).
+INGEST_DB (default db/cards.db), INGEST_CACHE_TTL seconds (default 86400).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .cli import run_auto
 from .extract import Extraction
+from .llm import get_client
+from .merchant import find_merchant_offers, result_to_dict
+from .security import InputError, RateLimiter, sanitize_query
 
 DB_PATH = os.environ.get("INGEST_DB", "db/cards.db")
 HOST = os.environ.get("INGEST_HOST", "0.0.0.0")
 PORT = int(os.environ.get("INGEST_PORT", "8765"))
+CACHE_TTL = int(os.environ.get("INGEST_CACHE_TTL", "86400"))  # 24h
+# Server-side defense-in-depth limit per client IP (client also limits itself).
+RATE_LIMIT = int(os.environ.get("INGEST_RATE_LIMIT", "30"))  # requests / minute
+_rate = RateLimiter(RATE_LIMIT, window_seconds=60)
+
+# merchant key -> (expires_at_epoch, payload). Shared across handler threads.
+_search_cache: dict[str, tuple[float, dict]] = {}
+_cache_lock = threading.Lock()
+
+
+def _cache_get(key: str) -> dict | None:
+    with _cache_lock:
+        entry = _search_cache.get(key)
+        if entry and entry[0] > time.time():
+            return entry[1]
+        if entry:
+            del _search_cache[key]
+    return None
+
+
+def _cache_put(key: str, payload: dict) -> None:
+    with _cache_lock:
+        _search_cache[key] = (time.time() + CACHE_TTL, payload)
 
 
 def extraction_to_dict(e: Extraction) -> dict:
@@ -55,22 +84,58 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"error": "not found"})
 
+    def _read_json(self) -> dict:
+        return json.loads(self._body or b"{}")
+
+    def _client_ip(self) -> str:
+        # Behind NPM: trust X-Forwarded-For's first hop if present.
+        fwd = self.headers.get("X-Forwarded-For")
+        if fwd:
+            return fwd.split(",")[0].strip()
+        return self.client_address[0]
+
     def do_POST(self):
-        if self.path != "/ingest":
-            self._send(404, {"error": "not found"})
-            return
         try:
-            length = int(self.headers.get("Content-Length", 0))
-            req = json.loads(self.rfile.read(length) or b"{}")
-            card_name = (req.get("card") or "").strip()
-            if not card_name:
-                self._send(400, {"error": "missing 'card'"})
+            # Drain the request body first so early responses (429/404) don't
+            # leave unread bytes on the socket (which causes client resets).
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            self._body = self.rfile.read(length)
+            if not _rate.allow(self._client_ip()):
+                self._send(429, {"error": "rate limit exceeded, slow down"})
                 return
-            result = run_auto(card_name, DB_PATH, provider=None,
-                              url=req.get("url"))
-            self._send(200, extraction_to_dict(result))
+            if self.path == "/ingest":
+                self._handle_ingest()
+            elif self.path == "/search":
+                self._handle_search()
+            else:
+                self._send(404, {"error": "not found"})
+        except InputError as e:
+            self._send(400, {"error": str(e)})
         except Exception as e:  # surface any pipeline failure to the app
             self._send(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _handle_ingest(self):
+        req = self._read_json()
+        # sanitize_query raises InputError (-> 400) on empty/oversized/malicious.
+        # NOTE: client-supplied 'url' is intentionally ignored here (SSRF guard);
+        # the server always discovers the doc URL itself.
+        card_name = sanitize_query(req.get("card"))
+        result = run_auto(card_name, DB_PATH, provider=None)
+        self._send(200, extraction_to_dict(result))
+
+    def _handle_search(self):
+        req = self._read_json()
+        merchant = sanitize_query(req.get("merchant"))  # InputError -> 400
+        key = merchant.lower()
+        cached = _cache_get(key)
+        if cached is not None:
+            self._send(200, dict(cached, cached=True))
+            return
+        # No client 'url' override (SSRF guard) — pipeline finds it itself.
+        result = find_merchant_offers(merchant, get_client())
+        payload = result_to_dict(result)
+        _cache_put(key, payload)
+        self._send(200, dict(payload, cached=False))
 
 
 def main() -> None:
