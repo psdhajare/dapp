@@ -34,6 +34,19 @@ def test_merchant_on_program_false_when_page_omits_merchant(monkeypatch):
     assert programs.merchant_on_program("Sushi Library", "entertainer") is False
 
 
+def test_non_member_restaurant_not_falsely_matched(monkeypatch):
+    # The bug: a restaurant NOT on Entertainer must not match. Its outlet page
+    # doesn't exist; search returns another outlet + a query-echo search URL.
+    # Generic word "restaurant" must not cause a match.
+    monkeypatch.setattr(discover, "search", lambda q: [
+        "https://www.theentertainerme.com/outlets/some-other-place",
+        "https://www.theentertainerme.com/search?q=royal+gulf+restaurant",
+    ])
+    monkeypatch.setattr(discover, "fetch_text",
+                        lambda u, timeout=0: "Browse hundreds of restaurants")
+    assert programs.merchant_on_program("Royal Gulf Restaurant", "entertainer") is False
+
+
 def test_merchant_on_program_ignores_non_member_domains(monkeypatch):
     # A page that names the merchant but isn't the program's site doesn't count.
     monkeypatch.setattr(discover, "search",

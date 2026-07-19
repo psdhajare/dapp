@@ -99,7 +99,7 @@ class BestCardApp extends StatelessWidget {
     return AnimatedBuilder(
       animation: profile,
       builder: (context, _) => MaterialApp(
-        title: 'Best Card',
+        title: 'ToroKard',
         debugShowCheckedModeBanner: false,
         theme: conciergeTheme(Brightness.light),
         darkTheme: conciergeTheme(Brightness.dark),
@@ -266,7 +266,23 @@ class _NavItem extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(selected ? selectedIcon : icon, size: 26, color: color),
+            // Selected icon sits in an accent-bordered pill; unselected keeps
+            // the same footprint (transparent border) so nothing shifts.
+            AnimatedContainer(
+              duration: ConciergeMotion.chip,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              decoration: BoxDecoration(
+                color: selected
+                    ? scheme.primary.withValues(alpha: 0.10)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: selected ? scheme.primary : Colors.transparent,
+                  width: 1.5,
+                ),
+              ),
+              child: Icon(selected ? selectedIcon : icon, size: 24, color: color),
+            ),
             const SizedBox(height: 3),
             Text(label,
                 style: Theme.of(context)
@@ -338,9 +354,11 @@ class _RecommendTabState extends State<RecommendTab>
   bool _searchLoading = false;
   List<MerchantOfferView>? _merchantOffers; // offers on the user's held cards
   List<MerchantOfferView> _otherOffers = const []; // non-held (secondary)
-  _Ranked? _offerWinner; // a held card with the best offer at the merchant
-  String? _offerHeadline; // deck headline for that offer ("1+1", "20%")
-  String? _offerCaption; // deck caption ("via The Entertainer", "at X")
+  // Deck re-ranked for a merchant search: each held card boosted to its best
+  // offer value, so every card (not just the top) reflects its real benefit.
+  List<_Ranked>? _searchDeck;
+  // cardId -> (headline, caption) for cards whose offer beats their base rate.
+  Map<String, (String, String)> _deckDisplay = {};
   int _celebrateToken = 0; // bumped to fire the on-card celebration
   bool _celebrateBig = false; // big crackers vs a light sparkle
   final Set<int> _revealed = {}; // reveal ids already animated this result
@@ -523,43 +541,47 @@ class _RecommendTabState extends State<RecommendTab>
     final walletOffers = deduped.where((o) => o.held).toList();
     final otherOffers = deduped.where((o) => !o.held).toList();
 
-    // Pick the highest-VALUE held offer to feature as the deck winner, so the
-    // top card is always the one that actually saves the most — a Buy-1-Get-1
-    // (~50%) beats a 5% category rate. Only feature it if it beats the best
-    // category rate for the card, else the normal ranking stands.
-    _Ranked? offerWinner;
-    String? offerHeadline;
-    String? offerCaption;
-    var bestValue = _result?.winner.rec.effectiveRate ?? 0.0;
+    // Re-rank the WHOLE deck by each card's best value here: a card's merchant
+    // offer boosts THAT card, so every position reflects real benefit — e.g.
+    // Wio 1+1 (50%) > ENBD 20% > Mashreq 5%, not just the single top winner.
+    final byId = <String, _Ranked>{};
+    final display = <String, (String, String)>{};
+    for (final rr in _result?.ranked ?? const <_Ranked>[]) {
+      byId[rr.card.id] = rr; // category baseline (headline stays the rate)
+    }
     for (final o in walletOffers) {
       final value = (o.valuePct ?? 0) / 100;
-      if (value <= bestValue) continue; // must beat the best category rate
+      if (value <= 0) continue;
       final card = _matchHeldCard(o.cardHint ?? '', held);
       if (card == null) continue;
-      bestValue = value;
-      offerWinner = _Ranked(
+      final baseRate = byId[card.id]?.rec.effectiveRate ?? 0.0;
+      if (value <= baseRate) continue; // offer must beat this card's own rate
+      byId[card.id] = _Ranked(
         card,
         Recommendation(
-          cardId: card.id,
-          categoryUsed: 'offer',
-          effectiveRate: value,
-          hasCap: false,
+          cardId: card.id, categoryUsed: 'offer',
+          effectiveRate: value, hasCap: false,
         ),
       );
-      offerHeadline = o.shortLabel ?? '${(o.valuePct ?? 0).round()}%';
-      offerCaption = o.via != null ? 'via ${o.via}' : 'at $_searchMerchant';
+      display[card.id] = (
+        o.shortLabel ?? '${(o.valuePct ?? 0).round()}%',
+        o.via != null ? 'via ${o.via}' : 'at $_searchMerchant',
+      );
     }
+    final deck = byId.values.toList()
+      ..sort((a, b) => b.rec.effectiveRate.compareTo(a.rec.effectiveRate));
+
     if (mounted) {
       setState(() {
         _merchantOffers = walletOffers;
         _otherOffers = otherOffers;
-        _offerWinner = offerWinner;
-        _offerHeadline = offerHeadline;
-        _offerCaption = offerCaption;
+        _searchDeck = deck.isEmpty ? null : deck;
+        _deckDisplay = display;
       });
       // Celebrate ONLY when the user's own card has an offer here — big.
       if (walletOffers.isNotEmpty) {
-        _celebrate(offerWinner?.rec.effectiveRate ?? 0.10, live: true);
+        _celebrate(deck.isNotEmpty ? deck.first.rec.effectiveRate : 0.10,
+            live: true);
         widget.analytics.log(Analytics.liveOfferViewed);
       }
     }
@@ -719,9 +741,8 @@ class _RecommendTabState extends State<RecommendTab>
       _searchMerchant = null;
       _merchantOffers = null;
       _otherOffers = const [];
-      _offerWinner = null;
-      _offerHeadline = null;
-      _offerCaption = null;
+      _searchDeck = null;
+      _deckDisplay = {};
     });
     try {
       final (lat, lng) = await widget.locationFn();
@@ -746,9 +767,8 @@ class _RecommendTabState extends State<RecommendTab>
       _searchMerchant = null;
       _merchantOffers = null;
       _otherOffers = const [];
-      _offerWinner = null;
-      _offerHeadline = null;
-      _offerCaption = null;
+      _searchDeck = null;
+      _deckDisplay = {};
     });
     try {
       await _recommend(category);
@@ -800,15 +820,15 @@ class _RecommendTabState extends State<RecommendTab>
   Future<void> _sharePick(_Result r) async {
     final w = _deckRanked(r).first;
     final pretty = prettyCategory(r.category);
+    final disp = _deckDisplay[w.card.id];
     widget.analytics.log(Analytics.proFeatureTapped, label: 'share');
     await shareBestCard(
       context,
       card: w.card,
       category: pretty,
-      headline: '${(w.rec.effectiveRate * 100).toStringAsFixed(2)}%',
-      caption: _offerWinner != null && _searchMerchant != null
-          ? 'at $_searchMerchant'
-          : 'back on $pretty',
+      headline:
+          disp?.$1 ?? '${(w.rec.effectiveRate * 100).toStringAsFixed(2)}%',
+      caption: disp?.$2 ?? 'back on $pretty',
     );
   }
 
@@ -829,16 +849,9 @@ class _RecommendTabState extends State<RecommendTab>
     });
   }
 
-  /// Deck cards: if a merchant %-offer matched a held card, feature it as the
-  /// winner (with its offer rate) above the category-ranked cards.
-  List<_Ranked> _deckRanked(_Result r) {
-    final w = _offerWinner;
-    if (w == null) return r.ranked;
-    return [
-      w,
-      ...r.ranked.where((x) => x.card.id != w.card.id),
-    ].take(3).toList();
-  }
+  /// Deck cards: during a merchant search, the offer-boosted re-rank; otherwise
+  /// the plain category ranking.
+  List<_Ranked> _deckRanked(_Result r) => (_searchDeck ?? r.ranked).take(3).toList();
 
   @override
   Widget build(BuildContext context) {
@@ -977,9 +990,7 @@ class _RecommendTabState extends State<RecommendTab>
                 child: _RankedDeck(
                   ranked: _deckRanked(r),
                   category: r.category,
-                  offerWinnerId: _offerWinner?.card.id,
-                  winnerHeadline: _offerHeadline,
-                  winnerCaption: _offerCaption,
+                  displays: _deckDisplay,
                   celebrateToken: _celebrateToken,
                   celebrateBig: _celebrateBig,
                 ),
@@ -1493,17 +1504,14 @@ class _RevealState extends State<_Reveal>
 class _RankedDeck extends StatefulWidget {
   final List<_Ranked> ranked;
   final String category;
-  final String? winnerCaption; // overrides "back on <category>" (e.g. offers)
-  final String? offerWinnerId; // card whose headline is the offer, not the rate
-  final String? winnerHeadline; // offer badge for that card, e.g. "1+1"
+  // cardId -> (headline, caption) for cards showing an offer instead of a rate.
+  final Map<String, (String, String)> displays;
   final int celebrateToken; // bump to fire the on-card celebration once
   final bool celebrateBig; // big crackers vs a light sparkle
   const _RankedDeck(
       {required this.ranked,
       required this.category,
-      this.winnerCaption,
-      this.offerWinnerId,
-      this.winnerHeadline,
+      this.displays = const {},
       this.celebrateToken = 0,
       this.celebrateBig = false});
 
@@ -1581,18 +1589,15 @@ class _RankedDeckState extends State<_RankedDeck>
                         big: widget.celebrateBig,
                         child: Builder(builder: (_) {
                           final top = _order.first;
-                          // If the top card is the featured offer, show the
-                          // offer badge ("1+1") + its caption; else the rate.
-                          final isOffer = top.card.id == widget.offerWinnerId &&
-                              widget.winnerHeadline != null;
+                          // Offer cards show their badge ("1+1"/"20%") + caption;
+                          // plain cards show the category rate.
+                          final disp = widget.displays[top.card.id];
                           return CardVisual(
                             card: top.card,
-                            headline: isOffer
-                                ? widget.winnerHeadline!
-                                : '${(top.rec.effectiveRate * 100).toStringAsFixed(2)}%',
-                            caption: isOffer
-                                ? (widget.winnerCaption ?? '')
-                                : 'back on ${prettyCategory(widget.category)}',
+                            headline: disp?.$1 ??
+                                '${(top.rec.effectiveRate * 100).toStringAsFixed(2)}%',
+                            caption: disp?.$2 ??
+                                'back on ${prettyCategory(widget.category)}',
                           );
                         }),
                       )

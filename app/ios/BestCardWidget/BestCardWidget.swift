@@ -111,7 +111,7 @@ struct BestCardWidget: Widget {
                 BestCardWidgetEntryView(entry: entry)
             }
         }
-        .configurationDisplayName("Best Card")
+        .configurationDisplayName("ToroKard")
         .description("Your best card for your top spend category.")
         .supportedFamilies([.systemSmall, .systemMedium])
     }

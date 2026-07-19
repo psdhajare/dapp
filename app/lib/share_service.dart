@@ -95,7 +95,7 @@ Future<void> _share(File file, String category, BuildContext context) async {
   try {
     await Share.shareXFiles(
       [XFile(file.path, mimeType: 'image/png', name: 'best_card.png')],
-      text: 'My best card for $category — via Best Card',
+      text: 'My best card for $category — via ToroKard',
       sharePositionOrigin: origin,
     );
   } catch (_) {

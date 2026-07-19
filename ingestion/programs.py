@@ -11,6 +11,7 @@ what makes offer coverage complete.
 from __future__ import annotations
 
 import re
+import urllib.parse
 from dataclasses import dataclass
 
 from . import discover
@@ -47,8 +48,23 @@ CARD_PROGRAMS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Generic words that don't identify a specific outlet — excluded from the
+# membership match so "restaurant" alone can't match every listing.
+_GENERIC = {
+    "the", "and", "of", "restaurant", "restaurants", "cafe", "coffee", "grill",
+    "kitchen", "bar", "lounge", "bistro", "eatery", "house", "dubai", "abu",
+    "dhabi", "sharjah", "uae", "mall", "branch", "outlet", "food", "dining",
+}
+
+
 def _tokens(s: str) -> set[str]:
     return {w for w in re.split(r"\W+", s.lower()) if len(w) > 2}
+
+
+def _distinctive(s: str) -> list[str]:
+    toks = [w for w in re.split(r"\W+", s.lower())
+            if len(w) > 2 and w not in _GENERIC]
+    return toks or [w for w in re.split(r"\W+", s.lower()) if len(w) > 2]
 
 
 def programs_for_cards(cards: list[str]) -> list[str]:
@@ -73,27 +89,27 @@ def granting_cards(program: str, cards: list[str]) -> list[str]:
 
 def merchant_on_program(merchant: str, program: str,
                         timeout: int = 12) -> bool:
-    """True if [merchant] is a member of [program] — confirmed from a readable
-    member-listing page that actually names the merchant."""
+    """True only if this SPECIFIC merchant has its own outlet page on the
+    program's site. We require ALL distinctive merchant tokens to appear in the
+    member-domain URL's own path (slug) — a non-member has no such outlet URL,
+    so generic words like 'restaurant' can't produce a false positive.
+    """
     prog = PROGRAMS.get(program)
     if not prog:
         return False
-    tokens = [w for w in re.split(r"\W+", merchant.lower()) if len(w) > 2]
-    if not tokens:
+    distinctive = _distinctive(merchant)
+    if not distinctive:
         return False
     try:
         results = discover.search(f"{merchant} {prog.name}")
     except Exception:
         return False
     for url in results[:8]:
-        if not any(d in url.lower() for d in prog.member_domains):
+        ul = url.lower()
+        if not any(d in ul for d in prog.member_domains):
             continue
-        try:
-            text = discover.fetch_text(url, timeout=timeout)
-        except Exception:
-            continue
-        low = text.lower()
-        # Require the merchant to actually appear on the member page.
-        if any(tok in low for tok in tokens):
+        # Slug/path must name this exact merchant (all distinctive tokens).
+        path = urllib.parse.urlparse(ul).path
+        if all(tok in path for tok in distinctive):
             return True
     return False

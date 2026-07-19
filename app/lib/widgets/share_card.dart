@@ -38,7 +38,7 @@ class ShareCard extends StatelessWidget {
           CardVisual(card: card, headline: headline, caption: caption),
           const SizedBox(height: 26),
           Text(
-            'Best Card · always pay with your best card',
+            'ToroKard · always pay with your best card',
             style: t.textTheme.bodySmall?.copyWith(
               color: t.colorScheme.onSurfaceVariant,
             ),

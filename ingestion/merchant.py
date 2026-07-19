@@ -137,6 +137,15 @@ def _gather_urls(merchant: str) -> list[str]:
     return seen
 
 
+def _dedupe_words(s: str) -> str:
+    """Collapse repeated adjacent words, e.g. 'Wio Wio Credit' -> 'Wio Credit'."""
+    out: list[str] = []
+    for w in s.split():
+        if not out or out[-1].lower() != w.lower():
+            out.append(w)
+    return " ".join(out)
+
+
 def _program_offers(merchant: str, cards: list[str] | None) -> list[MerchantOffer]:
     """Offers delivered by loyalty programs the user's cards grant, when the
     merchant participates. Only granted programs are checked (no waste)."""
@@ -154,7 +163,7 @@ def _program_offers(merchant: str, cards: list[str] | None) -> list[MerchantOffe
             continue
         prog = programs.PROGRAMS[key]
         grantors = programs.granting_cards(key, cards)
-        hint = grantors[0] if grantors else prog.name
+        hint = _dedupe_words(grantors[0]) if grantors else prog.name
         out.append(MerchantOffer(
             title=prog.default_offer,
             description=f"Included with your {hint} card via {prog.name}.",

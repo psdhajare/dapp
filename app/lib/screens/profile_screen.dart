@@ -184,7 +184,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           Center(
             child: Column(
               children: [
-                Text('Best Card 1.0.0',
+                Text('ToroKard 1.0.0',
                     style: t.textTheme.labelSmall?.copyWith(letterSpacing: 0)),
                 const SizedBox(height: 4),
                 Text('All data stays on this device.',

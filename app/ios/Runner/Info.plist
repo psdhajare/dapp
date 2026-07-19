@@ -7,9 +7,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Best Card</string>
+	<string>ToroKard</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Best Card uses your location to detect the venue type and recommend the best card to pay with.</string>
+	<string>ToroKard uses your location to detect the venue type and recommend the best card to pay with.</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
