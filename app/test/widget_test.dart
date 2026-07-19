@@ -283,5 +283,7 @@ void main() {
     // Amex gone -> barclays grocery 1% is now the pick.
     expect(find.text('Barclays Cashback'), findsOneWidget);
     expect(find.text('BARCLAYS'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 3)); // flush the removed-toast timer
   });
 }

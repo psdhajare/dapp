@@ -2424,27 +2424,15 @@ class _WalletTabState extends State<WalletTab> {
     await widget.dao.setHeld(card.id, false);
     widget.onWalletChanged?.call();
     if (mounted) {
-      final messenger = ScaffoldMessenger.of(context);
-      messenger.clearSnackBars();
-      final controller = messenger.showSnackBar(SnackBar(
-        content: Text('Removed ${card.name}'),
-        duration: const Duration(seconds: 3),
-        margin: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-        action: SnackBarAction(
-          label: 'Undo',
-          onPressed: () async {
+      // Same top banner as "Added", with an Undo action.
+      _walletToast('Removed ${card.name}',
+          icon: Icons.delete_outline,
+          actionLabel: 'Undo',
+          onAction: () async {
             await widget.dao.setHeld(card.id, true);
             await _load();
             widget.onWalletChanged?.call();
-          },
-        ),
-      ));
-      // Guaranteed dismissal: Flutter suppresses the built-in auto-dismiss
-      // timer when accessibility navigation is active (seen on iOS), so hide
-      // it ourselves. No-op if the user already tapped Undo.
-      Future.delayed(const Duration(seconds: 3), () {
-        controller.close();
-      });
+          });
     }
   }
 
@@ -2473,13 +2461,22 @@ class _WalletTabState extends State<WalletTab> {
     }
   }
 
-  /// Green confirmation banner that slides down from the top — clear of the
-  /// pinned "Add a card" button and bottom nav.
-  void _walletToast(String message) {
+  /// Confirmation banner that slides down from the top — clear of the pinned
+  /// "Add a card" button and bottom nav. Optional Undo action.
+  void _walletToast(String message,
+      {IconData icon = Icons.check_circle,
+      String? actionLabel,
+      VoidCallback? onAction}) {
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
     entry = OverlayEntry(
-      builder: (_) => _TopToast(message: message, onDone: entry.remove),
+      builder: (_) => _TopToast(
+        message: message,
+        icon: icon,
+        actionLabel: actionLabel,
+        onAction: onAction,
+        onDone: entry.remove,
+      ),
     );
     overlay.insert(entry);
   }
@@ -2836,7 +2833,16 @@ class GoogleFontsSafe {
 class _TopToast extends StatefulWidget {
   final String message;
   final VoidCallback onDone;
-  const _TopToast({required this.message, required this.onDone});
+  final IconData icon;
+  final String? actionLabel;
+  final VoidCallback? onAction;
+  const _TopToast({
+    required this.message,
+    required this.onDone,
+    this.icon = Icons.check_circle,
+    this.actionLabel,
+    this.onAction,
+  });
 
   @override
   State<_TopToast> createState() => _TopToastState();
@@ -2846,6 +2852,7 @@ class _TopToastState extends State<_TopToast>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
       vsync: this, duration: const Duration(milliseconds: 260));
+  bool _closed = false;
 
   @override
   void initState() {
@@ -2856,6 +2863,12 @@ class _TopToastState extends State<_TopToast>
   Future<void> _run() async {
     await _c.forward();
     await Future.delayed(const Duration(milliseconds: 2400));
+    await _dismiss();
+  }
+
+  Future<void> _dismiss() async {
+    if (_closed) return;
+    _closed = true;
     if (mounted) await _c.reverse();
     widget.onDone();
   }
@@ -2901,8 +2914,7 @@ class _TopToastState extends State<_TopToast>
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.check_circle,
-                          color: scheme.onPrimary, size: 20),
+                      Icon(widget.icon, color: scheme.onPrimary, size: 20),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Text(widget.message,
@@ -2910,6 +2922,22 @@ class _TopToastState extends State<_TopToast>
                                 color: scheme.onPrimary,
                                 fontWeight: FontWeight.w600)),
                       ),
+                      if (widget.actionLabel != null)
+                        GestureDetector(
+                          onTap: () {
+                            widget.onAction?.call();
+                            _dismiss();
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.only(left: 10),
+                            child: Text(widget.actionLabel!,
+                                style: TextStyle(
+                                    color: scheme.onPrimary,
+                                    fontWeight: FontWeight.w700,
+                                    decoration: TextDecoration.underline,
+                                    decorationColor: scheme.onPrimary)),
+                          ),
+                        ),
                     ],
                   ),
                 ),
