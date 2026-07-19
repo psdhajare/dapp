@@ -9,7 +9,9 @@ import 'package:http/http.dart' as http;
 
 class IngestException implements Exception {
   final String message;
-  IngestException(this.message);
+  final int? statusCode; // HTTP status, when the failure came from the server
+  IngestException(this.message, {this.statusCode});
+  bool get notFound => statusCode == 404;
   @override
   String toString() => message;
 }
@@ -53,7 +55,8 @@ class IngestService {
     }
     final body = jsonDecode(resp.body) as Map<String, dynamic>;
     if (resp.statusCode != 200) {
-      throw IngestException(body['error']?.toString() ?? 'request failed');
+      throw IngestException(body['error']?.toString() ?? 'request failed',
+          statusCode: resp.statusCode);
     }
     return body;
   }

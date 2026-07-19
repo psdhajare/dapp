@@ -115,6 +115,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, {"error": "not found"})
         except InputError as e:
             self._send(400, {"error": str(e)})
+        except LookupError:
+            # No document found for this card — usually a wrong/misspelt name.
+            self._send(404, {"error": "card_not_found"})
         except Exception as e:  # log full detail server-side; app shows a
             # friendly message. Keep a short code in the body for support.
             traceback.print_exc()

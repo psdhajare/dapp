@@ -18,7 +18,9 @@ def running_server(monkeypatch, tmp_path):
     def fake_run_auto(card_name, db_path, provider=None, url=None, client=None,
                       country=""):
         if card_name == "Broken Card":
-            raise LookupError("no search results")
+            raise RuntimeError("pipeline blew up")  # -> 500
+        if card_name == "Nonexistent Card":
+            raise LookupError("no search results")  # -> 404 card_not_found
         card = Card(id="test_card", name=card_name, issuer="Test Bank", network="visa")
         return [Extraction(
             card=card,
@@ -84,7 +86,13 @@ def test_ingest_pipeline_failure_500(running_server):
     status, body = _post(f"{running_server}/ingest", {"card": "Broken Card"})
     assert status == 500
     assert body["error"] == "server_error"
-    assert "LookupError" in body["detail"]  # detail kept for support/logs
+    assert "RuntimeError" in body["detail"]  # detail kept for support/logs
+
+
+def test_ingest_card_not_found_404(running_server):
+    status, body = _post(f"{running_server}/ingest", {"card": "Nonexistent Card"})
+    assert status == 404
+    assert body["error"] == "card_not_found"
 
 
 def test_search_returns_category_and_offers(running_server):

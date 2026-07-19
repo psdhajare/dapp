@@ -2709,11 +2709,15 @@ class _AddCardSheetState extends State<_AddCardSheet> {
         _fetched = cards;
         _gradient = randomGradient(); // assign a colour, highlighted below
       });
-    } catch (_) {
+    } catch (e) {
       widget.analytics.log(Analytics.cardAddedFail);
+      // A wrong/misspelt name → "not found"; anything else → generic.
+      final notFound = e is IngestException && e.notFound;
       setState(() {
         _busy = false;
-        _error = kFriendlyError;
+        _error = notFound
+            ? "Card not found. Please provide the exact card name for better results."
+            : kFriendlyError;
       });
     }
   }
