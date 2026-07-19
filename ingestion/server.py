@@ -120,8 +120,9 @@ class Handler(BaseHTTPRequestHandler):
         # NOTE: client-supplied 'url' is intentionally ignored here (SSRF guard);
         # the server always discovers the doc URL itself.
         card_name = sanitize_query(req.get("card"))
-        result = run_auto(card_name, DB_PATH, provider=None)
-        self._send(200, extraction_to_dict(result))
+        results = run_auto(card_name, DB_PATH, provider=None)
+        # A product can be a bundle of >1 physical card (e.g. a dual-card set).
+        self._send(200, {"cards": [extraction_to_dict(e) for e in results]})
 
     def _handle_search(self):
         req = self._read_json()

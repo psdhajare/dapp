@@ -33,7 +33,12 @@ SYSTEM_PROMPT = (
     "free airport lounge, valet parking) as offers with the closest matching "
     "category or null. For color_primary/color_secondary give the physical "
     "card's design colors as hex — from the document or from your knowledge "
-    "of this specific card's look; null if you don't know it."
+    "of this specific card's look; null if you don't know it. "
+    "If the product is a bundle of MULTIPLE distinct physical cards with "
+    "different reward structures (e.g. a dual-card set where one card is for "
+    "dining and another for everyday spend), return a top-level \"cards\" array "
+    "with one entry per physical card, each with its own distinct name and its "
+    "own rules/offers/points_valuation. Otherwise return a single \"card\"."
 )
 
 USER_TEMPLATE = """Extract the card and its reward rules from this document.
@@ -50,6 +55,10 @@ Return JSON with this shape:
   "offers": [{{"title": str, "category": str|null, "description": str|null}}],
   "points_valuation": {{"points_currency": str, "value_per_point": number}} | null
 }}
+
+For a multi-card product, return instead:
+{{"cards": [{{"card": {{...}}, "rules": [...], "offers": [...],
+             "points_valuation": ... | null}}, ...]}}
 
 Document:
 ---
@@ -70,10 +79,20 @@ def _slug(*parts: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", " ".join(parts).lower()).strip("_")
 
 
-def extract(text: str, client: LLMClient, source_ref: str) -> Extraction:
+def extract_all(text: str, client: LLMClient, source_ref: str) -> list[Extraction]:
+    """Extract one or more cards. Multi-card products yield >1 Extraction."""
     raw = client.complete(SYSTEM_PROMPT, USER_TEMPLATE.format(text=text))
     data = _parse_json(raw)
+    entries = data["cards"] if isinstance(data.get("cards"), list) else [data]
+    return [_extract_one(entry, source_ref) for entry in entries]
 
+
+def extract(text: str, client: LLMClient, source_ref: str) -> Extraction:
+    """Single-card convenience wrapper (returns the first extracted card)."""
+    return extract_all(text, client, source_ref)[0]
+
+
+def _extract_one(data: dict, source_ref: str) -> Extraction:
     card_data = dict(data["card"])
     if not card_data.get("id"):  # LLMs often leave id null; derive it
         card_data["id"] = _slug(card_data.get("issuer") or "", card_data.get("name") or "")
@@ -141,6 +160,6 @@ def _parse_json(raw: str) -> dict:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         raise ValueError(f"LLM did not return valid JSON: {e}") from e
-    if "card" not in data:
+    if "card" not in data and "cards" not in data:
         raise ValueError("LLM response missing 'card'")
     return data

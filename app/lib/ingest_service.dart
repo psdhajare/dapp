@@ -21,9 +21,13 @@ class IngestService {
   IngestService({required this.endpoint, http.Client? client})
       : client = client ?? http.Client();
 
-  /// Returns the extraction payload: {card, rules, valuation, offers, warnings}.
-  Future<Map<String, dynamic>> ingest(String cardName) =>
-      _post(endpoint, {'card': cardName});
+  /// Returns one extraction payload per physical card (a product can be a
+  /// bundle of several). Each: {card, rules, valuation, offers, warnings}.
+  Future<List<Map<String, dynamic>>> ingest(String cardName) async {
+    final body = await _post(endpoint, {'card': cardName});
+    final cards = body['cards'] as List? ?? [body]; // tolerate legacy shape
+    return cards.cast<Map<String, dynamic>>();
+  }
 
   /// Live merchant lookup: {merchant, category, offers[], source_ref, cached}.
   /// offers[] items: {title, description, card_hint, valid_until}.

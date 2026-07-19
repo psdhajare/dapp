@@ -15,6 +15,7 @@ import 'rate_limiter.dart';
 import 'screens/profile_screen.dart';
 import 'theme/concierge_theme.dart';
 import 'util/formatting.dart';
+import 'util/gradients.dart';
 import 'venue.dart';
 import 'widgets/card_visual.dart';
 
@@ -360,11 +361,22 @@ class _RecommendTabState extends State<RecommendTab> {
   Future<void> _refreshCardData() async {
     final ingest = widget.ingest;
     if (ingest == null) return;
-    final held = (await widget.dao.allCards()).where((c) => c.held).toList();
+    final all = await widget.dao.allCards();
+    final held = all.where((c) => c.held).toList();
+    // Keep each card's user-picked face color across a refresh.
+    final colors = {for (final c in all) c.id: (c.colorPrimary, c.colorSecondary)};
     for (final c in held) {
       try {
-        final data = await ingest.ingest(c.name);
-        await widget.dao.insertExtraction(data);
+        final cards = await ingest.ingest(c.name);
+        for (final data in cards) {
+          final id = (data['card'] as Map)['id'];
+          final existing = colors[id];
+          await widget.dao.insertExtraction(
+            data,
+            colorPrimary: existing?.$1,
+            colorSecondary: existing?.$2,
+          );
+        }
       } catch (_) {
         // leave this card as-is on failure
       }
@@ -1995,6 +2007,8 @@ class _AddCardSheetState extends State<_AddCardSheet> {
   final _name = TextEditingController();
   bool _busy = false;
   String? _error;
+  // Face color is a user choice, not guessed. Starts on a random preset.
+  CardGradient _gradient = randomGradient();
 
   @override
   void dispose() {
@@ -2027,8 +2041,17 @@ class _AddCardSheetState extends State<_AddCardSheet> {
       _error = null;
     });
     try {
-      final data = await ingest.ingest(name);
-      await widget.dao.insertExtraction(data);
+      final cards = await ingest.ingest(name);
+      // First card uses the picked gradient; a multi-card product (e.g. a
+      // dual-card set) gets distinct presets so the cards look different.
+      final palette = distinctGradients(_gradient, cards.length);
+      for (var i = 0; i < cards.length; i++) {
+        await widget.dao.insertExtraction(
+          cards[i],
+          colorPrimary: palette[i].primary,
+          colorSecondary: palette[i].secondary,
+        );
+      }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       setState(() {
@@ -2091,6 +2114,17 @@ class _AddCardSheetState extends State<_AddCardSheet> {
                 key: const Key('add_card_error'),
                 style: t.textTheme.bodySmall?.copyWith(color: scheme.error)),
           ],
+          if (!_busy) ...[
+            const SizedBox(height: 18),
+            Text('Card colour',
+                style: t.textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSurfaceVariant)),
+            const SizedBox(height: 10),
+            _GradientPicker(
+              selected: _gradient,
+              onSelected: (g) => setState(() => _gradient = g),
+            ),
+          ],
           const SizedBox(height: 16),
           if (_busy)
             Column(
@@ -2124,4 +2158,49 @@ class GoogleFontsSafe {
   static TextStyle title(ThemeData t) =>
       (t.textTheme.displaySmall ?? const TextStyle())
           .copyWith(fontSize: 20, fontWeight: FontWeight.w500);
+}
+
+/// Horizontal row of tappable gradient swatches for the add-card sheet.
+class _GradientPicker extends StatelessWidget {
+  final CardGradient selected;
+  final ValueChanged<CardGradient> onSelected;
+  const _GradientPicker({required this.selected, required this.onSelected});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SizedBox(
+      height: 44,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: presetGradients.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 12),
+        itemBuilder: (_, i) {
+          final g = presetGradients[i];
+          final isSel = g.name == selected.name;
+          final a = parseHex(g.primary)!;
+          final b = parseHex(g.secondary)!;
+          return GestureDetector(
+            key: Key('swatch_${g.name}'),
+            onTap: () => onSelected(g),
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                gradient: cardFace(a, b),
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: isSel ? scheme.primary : scheme.outline,
+                  width: isSel ? 2.5 : 1,
+                ),
+              ),
+              child: isSel
+                  ? Icon(Icons.check, size: 18, color: cardInk(a, b))
+                  : null,
+            ),
+          );
+        },
+      ),
+    );
+  }
 }

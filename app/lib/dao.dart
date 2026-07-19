@@ -149,7 +149,11 @@ class CardDao {
 
   /// Store an extraction payload from the ingestion service: card, rules,
   /// valuation, offers — and put the card in the wallet.
-  Future<void> insertExtraction(Map<String, dynamic> data) async {
+  Future<void> insertExtraction(
+    Map<String, dynamic> data, {
+    String? colorPrimary,
+    String? colorSecondary,
+  }) async {
     final card = data['card'] as Map<String, dynamic>;
     final cardId = card['id'] as String;
 
@@ -161,8 +165,9 @@ class CardDao {
         'network': card['network'],
         'currency': card['currency'] ?? 'GBP',
         'annual_fee': card['annual_fee'] ?? 0,
-        'color_primary': card['color_primary'],
-        'color_secondary': card['color_secondary'],
+        // User-picked gradient wins over anything the server guessed.
+        'color_primary': colorPrimary ?? card['color_primary'],
+        'color_secondary': colorSecondary ?? card['color_secondary'],
       }, conflictAlgorithm: ConflictAlgorithm.replace);
 
       for (final r in (data['rules'] as List? ?? [])) {

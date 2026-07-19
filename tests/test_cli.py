@@ -10,9 +10,9 @@ def test_run_extracts_and_writes_db(tmp_path):
     doc.write_text("Amex Gold rewards ...")
     db_path = tmp_path / "cards.db"
 
-    result = run(str(doc), str(db_path), provider=None, client=FakeLLM(GOOD))
+    results = run(str(doc), str(db_path), provider=None, client=FakeLLM(GOOD))
 
-    assert result.card.id == "amex_gold"
+    assert results[0].card.id == "amex_gold"
 
     db = Database(str(db_path))
     assert db.get_card("amex_gold").name == "Amex Gold"

@@ -19,14 +19,14 @@ def running_server(monkeypatch, tmp_path):
         if card_name == "Broken Card":
             raise LookupError("no search results")
         card = Card(id="test_card", name=card_name, issuer="Test Bank", network="visa")
-        return Extraction(
+        return [Extraction(
             card=card,
             rules=[RewardRule(card_id="test_card", category="general",
                               rate=1.0, unit="cashback_pct")],
             valuation=None,
             offers=[Offer(card_id="test_card", title="Welcome bonus")],
             warnings=["something skipped"],
-        )
+        )]
 
     # Count how many times the (expensive) merchant pipeline runs.
     calls = {"n": 0}
@@ -67,10 +67,11 @@ def _post(url: str, body: dict) -> tuple[int, dict]:
 def test_ingest_returns_extraction(running_server):
     status, body = _post(f"{running_server}/ingest", {"card": "My Card"})
     assert status == 200
-    assert body["card"]["id"] == "test_card"
-    assert body["rules"][0]["category"] == "general"
-    assert body["offers"][0]["title"] == "Welcome bonus"
-    assert body["warnings"] == ["something skipped"]
+    card = body["cards"][0]
+    assert card["card"]["id"] == "test_card"
+    assert card["rules"][0]["category"] == "general"
+    assert card["offers"][0]["title"] == "Welcome bonus"
+    assert card["warnings"] == ["something skipped"]
 
 
 def test_ingest_missing_card_400(running_server):

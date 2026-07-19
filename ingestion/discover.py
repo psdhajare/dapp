@@ -95,22 +95,6 @@ def html_to_text(html: str) -> str:
     return "\n".join(parser.parts)
 
 
-def fetch_html(url: str, timeout: int = 15) -> str:
-    """Fetch a URL and return the raw HTML (for og:image / card-image parsing)."""
-    resp = requests.get(url, headers=HEADERS, timeout=timeout)
-    resp.raise_for_status()
-    if "html" not in resp.headers.get("content-type", "").lower():
-        return ""
-    return resp.text
-
-
-def fetch_bytes(url: str, timeout: int = 15) -> bytes:
-    """Fetch raw bytes (e.g. a card image)."""
-    resp = requests.get(url, headers=HEADERS, timeout=timeout)
-    resp.raise_for_status()
-    return resp.content
-
-
 def fetch_text(url: str, timeout: int = 60) -> str:
     """Fetch a URL and return clean text (HTML stripped, PDFs parsed)."""
     resp = requests.get(url, headers=HEADERS, timeout=timeout)

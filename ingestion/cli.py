@@ -10,22 +10,23 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import cardimage, discover
+from . import discover
 from .db import Database
-from .extract import Extraction, extract
+from .extract import Extraction, extract_all
 from .llm import get_client
 from .loader import load_text
 
 
-def run(path: str, db_path: str, provider: str | None, client=None) -> Extraction:
-    """Ingest a local doc file."""
+def run(path: str, db_path: str, provider: str | None,
+        client=None) -> list[Extraction]:
+    """Ingest a local doc file. Returns one Extraction per physical card."""
     text = load_text(path)
     return _ingest(text, source_ref=path, db_path=db_path,
                    provider=provider, client=client)
 
 
 def run_auto(card_name: str, db_path: str, provider: str | None,
-             client=None, url: str | None = None) -> Extraction:
+             client=None, url: str | None = None) -> list[Extraction]:
     """Whole flow: card name -> find official doc -> fetch -> extract -> DB."""
     url = url or discover.find_doc_url(card_name)
     print(f"Doc: {url}")
@@ -37,29 +38,24 @@ def run_auto(card_name: str, db_path: str, provider: str | None,
 
 
 def _ingest(text: str, source_ref: str, db_path: str,
-            provider: str | None, client=None) -> Extraction:
+            provider: str | None, client=None) -> list[Extraction]:
     client = client or get_client(provider)
-    result = extract(text, client, source_ref=source_ref)
-
-    # Prefer the card's real face color from its image over the LLM's guess.
-    colors = cardimage.card_colors(source_ref)
-    if colors:
-        result.card.color_primary, result.card.color_secondary = colors
-
-    _print_summary(result)
+    results = extract_all(text, client, source_ref=source_ref)
 
     db = Database(db_path)
     db.init_schema_if_needed()
-    db.upsert_card(result.card)
-    for rule in result.rules:
-        db.upsert_rule(rule)
-    if result.valuation:
-        db.upsert_valuation(result.valuation)
-    for offer in result.offers:
-        db.upsert_offer(offer)
-    db.mark_held(result.card.id)
+    for result in results:
+        _print_summary(result)
+        db.upsert_card(result.card)
+        for rule in result.rules:
+            db.upsert_rule(rule)
+        if result.valuation:
+            db.upsert_valuation(result.valuation)
+        for offer in result.offers:
+            db.upsert_offer(offer)
+        db.mark_held(result.card.id)
     db.close()
-    return result
+    return results
 
 
 def _print_summary(r: Extraction) -> None:
