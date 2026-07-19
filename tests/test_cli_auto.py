@@ -4,10 +4,16 @@ import json
 
 import pytest
 
-from ingestion import discover
+from ingestion import cardimage, discover
 from ingestion.cli import run_auto
 from ingestion.db import Database
 from tests.test_extract import FakeLLM
+
+
+@pytest.fixture(autouse=True)
+def _no_image_fetch(monkeypatch):
+    # Color extraction hits the live card page; keep these flow tests offline.
+    monkeypatch.setattr(cardimage, "card_colors", lambda url: None)
 
 DUO = json.dumps({
     "card": {"id": "enbd_duo", "name": "Emirates NBD Duo", "issuer": "Emirates NBD",

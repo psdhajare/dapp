@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import discover
+from . import cardimage, discover
 from .db import Database
 from .extract import Extraction, extract
 from .llm import get_client
@@ -40,6 +40,11 @@ def _ingest(text: str, source_ref: str, db_path: str,
             provider: str | None, client=None) -> Extraction:
     client = client or get_client(provider)
     result = extract(text, client, source_ref=source_ref)
+
+    # Prefer the card's real face color from its image over the LLM's guess.
+    colors = cardimage.card_colors(source_ref)
+    if colors:
+        result.card.color_primary, result.card.color_secondary = colors
 
     _print_summary(result)
 

@@ -12,8 +12,11 @@ import 'input_guard.dart';
 import 'merchant_category.dart';
 import 'profile_store.dart';
 import 'rate_limiter.dart';
+import 'screens/profile_screen.dart';
 import 'theme/concierge_theme.dart';
+import 'util/formatting.dart';
 import 'venue.dart';
+import 'widgets/card_visual.dart';
 
 /// Returns current position as (lat, lng).
 typedef LocationFn = Future<(double, double)> Function();
@@ -182,31 +185,78 @@ class _BlurNav extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final x = Theme.of(context).extension<ConciergeColors>()!;
+    final bottom = MediaQuery.of(context).padding.bottom;
     return ClipRect(
       child: BackdropFilter(
         filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-        child: DecoratedBox(
+        child: Container(
           decoration: BoxDecoration(
             color: x.navFill,
             border: Border(top: BorderSide(color: scheme.outline)),
           ),
-          child: NavigationBar(
-            selectedIndex: tab,
-            onDestinationSelected: onSelect,
-            destinations: const [
-              NavigationDestination(
-                icon: Icon(Icons.style_outlined),
-                selectedIcon: Icon(Icons.style),
+          // Symmetric 10px above/below the icon+label; home indicator sits below.
+          padding: EdgeInsets.only(top: 10, bottom: 10 + bottom),
+          child: Row(
+            children: [
+              _NavItem(
+                icon: Icons.style_outlined,
+                selectedIcon: Icons.style,
                 label: 'Best card',
+                selected: tab == 0,
+                onTap: () => onSelect(0),
               ),
-              NavigationDestination(
-                key: Key('wallet_button'),
-                icon: Icon(Icons.account_balance_wallet_outlined),
-                selectedIcon: Icon(Icons.account_balance_wallet),
+              _NavItem(
+                buttonKey: const Key('wallet_button'),
+                icon: Icons.account_balance_wallet_outlined,
+                selectedIcon: Icons.account_balance_wallet,
                 label: 'Wallet',
+                selected: tab == 1,
+                onTap: () => onSelect(1),
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NavItem extends StatelessWidget {
+  final IconData icon;
+  final IconData selectedIcon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final Key? buttonKey;
+  const _NavItem({
+    required this.icon,
+    required this.selectedIcon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.buttonKey,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = selected ? scheme.primary : scheme.onSurfaceVariant;
+    return Expanded(
+      child: InkResponse(
+        key: buttonKey,
+        onTap: onTap,
+        radius: 40,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(selected ? selectedIcon : icon, size: 26, color: color),
+            const SizedBox(height: 3),
+            Text(label,
+                style: Theme.of(context)
+                    .textTheme
+                    .labelMedium
+                    ?.copyWith(color: color)),
+          ],
         ),
       ),
     );
@@ -262,6 +312,8 @@ class _RecommendTabState extends State<RecommendTab> {
 
   final _searchCtl = TextEditingController();
   final _searchFocus = FocusNode();
+  final _searchLink = LayerLink();
+  final _historyOverlay = OverlayPortalController();
   String? _searchMerchant; // the queried merchant, when in search mode
   bool _searchLoading = false;
   List<MerchantOfferView>? _merchantOffers;
@@ -271,8 +323,15 @@ class _RecommendTabState extends State<RecommendTab> {
   @override
   void initState() {
     super.initState();
-    // Rebuild when focus changes so the recent-searches panel shows/hides.
-    _searchFocus.addListener(() => setState(() {}));
+    // Show the recent-searches dropdown (a floating overlay) while focused.
+    _searchFocus.addListener(() {
+      if (_searchFocus.hasFocus) {
+        _historyOverlay.show();
+      } else {
+        _historyOverlay.hide();
+      }
+      setState(() {});
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) => _recommend('general'));
   }
 
@@ -285,6 +344,32 @@ class _RecommendTabState extends State<RecommendTab> {
 
   Future<void> refreshAfterWalletChange() async {
     await _recommend(_result?.category ?? 'general');
+  }
+
+  /// Profile → "Remove all cards": empties the wallet, then re-ranks.
+  Future<void> _removeAllCards() async {
+    final held = (await widget.dao.allCards()).where((c) => c.held);
+    for (final c in held) {
+      await widget.dao.setHeld(c.id, false);
+    }
+    await refreshAfterWalletChange();
+  }
+
+  /// Profile → "Refresh card data": re-ingest each held card's rules from the
+  /// bank's official page (best-effort; skips any that fail), then re-ranks.
+  Future<void> _refreshCardData() async {
+    final ingest = widget.ingest;
+    if (ingest == null) return;
+    final held = (await widget.dao.allCards()).where((c) => c.held).toList();
+    for (final c in held) {
+      try {
+        final data = await ingest.ingest(c.name);
+        await widget.dao.insertExtraction(data);
+      } catch (_) {
+        // leave this card as-is on failure
+      }
+    }
+    await refreshAfterWalletChange();
   }
 
   /// Search a specific merchant: instant best card from the offline keyword
@@ -410,6 +495,131 @@ class _RecommendTabState extends State<RecommendTab> {
     return null;
   }
 
+  /// Floating recent-searches dropdown, anchored under the search field via a
+  /// LayerLink so it overlays content (chips/deck) instead of pushing it down.
+  Widget _buildHistoryOverlay(BuildContext context) {
+    final t = Theme.of(context);
+    final scheme = t.colorScheme;
+    final gutter = 20.0;
+    final width = MediaQuery.of(context).size.width - gutter * 2;
+    return AnimatedBuilder(
+      animation: widget.profile,
+      builder: (context, _) {
+        final items = widget.profile.searchHistory;
+        if (!widget.profile.searchHistoryEnabled || items.isEmpty) {
+          return const SizedBox.shrink();
+        }
+        return Stack(
+          children: [
+            // Scrim from the field's bottom edge downward (title stays clear);
+            // tap it to dismiss.
+            CompositedTransformFollower(
+              link: _searchLink,
+              showWhenUnlinked: false,
+              targetAnchor: Alignment.bottomLeft,
+              followerAnchor: Alignment.topLeft,
+              offset: Offset(-gutter, 6),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => FocusScope.of(context).unfocus(),
+                child: SizedBox(
+                  width: MediaQuery.of(context).size.width,
+                  height: MediaQuery.of(context).size.height,
+                  child: ColoredBox(
+                      color: scheme.onSurface.withValues(alpha: 0.18)),
+                ),
+              ),
+            ),
+            CompositedTransformFollower(
+              link: _searchLink,
+              showWhenUnlinked: false,
+              targetAnchor: Alignment.bottomLeft,
+              followerAnchor: Alignment.topLeft,
+              offset: const Offset(0, 8),
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: Material(
+                  elevation: 8,
+                  borderRadius: BorderRadius.circular(14),
+                  shadowColor: Colors.black.withValues(alpha: 0.4),
+                  color: Color.alphaBlend(
+                      scheme.onSurface.withValues(alpha: 0.06), scheme.surface),
+                  child: Container(
+                    width: width,
+                    constraints: const BoxConstraints(maxHeight: 320),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: scheme.outline),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding:
+                              const EdgeInsets.fromLTRB(14, 6, 10, 4),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text('RECENT', style: t.textTheme.labelSmall),
+                              GestureDetector(
+                                onTap: widget.profile.clearSearchHistory,
+                                child: Text('Clear',
+                                    style: t.textTheme.labelMedium
+                                        ?.copyWith(color: scheme.primary)),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Flexible(
+                          child: ListView(
+                            padding: EdgeInsets.zero,
+                            shrinkWrap: true,
+                            children: [
+                              for (final term in items)
+                                InkWell(
+                                  onTap: () {
+                                    _searchCtl.text = term;
+                                    _search(term);
+                                  },
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 14, vertical: 11),
+                                    child: Row(
+                                      children: [
+                                        Icon(Icons.history,
+                                            size: 18,
+                                            color: scheme.onSurfaceVariant),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Text(term,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: t.textTheme.bodyMedium),
+                                        ),
+                                        Icon(Icons.north_west,
+                                            size: 15,
+                                            color: scheme.onSurfaceVariant),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   void _toast(String message) {
     if (!mounted) return;
     final m = ScaffoldMessenger.of(context);
@@ -470,7 +680,7 @@ class _RecommendTabState extends State<RecommendTab> {
     final recs = rankCards(category, cards);
     if (recs.isEmpty) {
       setState(() {
-        _status = 'No card in your wallet covers $category yet.';
+        _status = 'No card in your wallet covers ${prettyCategory(category)} yet.';
         _result = null;
       });
       return;
@@ -540,57 +750,62 @@ class _RecommendTabState extends State<RecommendTab> {
                   ),
                   _ProfileButton(
                     onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) =>
-                            ProfileScreen(profile: widget.profile))),
+                        builder: (_) => ProfileScreen(
+                              profile: widget.profile,
+                              onRefreshCardData: _refreshCardData,
+                              onRemoveAllCards: _removeAllCards,
+                            ))),
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 16),
-            TextField(
-              key: const Key('merchant_search'),
-              controller: _searchCtl,
-              focusNode: _searchFocus,
-              textInputAction: TextInputAction.search,
-              onSubmitted: _search,
-              decoration: InputDecoration(
-                hintText: 'Search a shop, place, or website',
-                prefixIcon: const Icon(Icons.search, size: 20),
-                suffixIcon: _searchLoading
-                    ? const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2)),
-                      )
-                    : (_searchCtl.text.isNotEmpty || _searchFocus.hasFocus)
-                        ? IconButton(
-                            icon: const Icon(Icons.close, size: 18),
-                            tooltip: 'Clear',
-                            onPressed: () {
-                              _searchCtl.clear();
-                              FocusScope.of(context).unfocus();
-                              setState(() {});
-                            },
+            OverlayPortal(
+              controller: _historyOverlay,
+              overlayChildBuilder: _buildHistoryOverlay,
+              child: CompositedTransformTarget(
+                link: _searchLink,
+                child: TextField(
+                  key: const Key('merchant_search'),
+                  controller: _searchCtl,
+                  focusNode: _searchFocus,
+                  textInputAction: TextInputAction.search,
+                  onSubmitted: _search,
+                  decoration: InputDecoration(
+                    hintText: 'Search a shop, place, or website',
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    suffixIcon: _searchLoading
+                        ? const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: SizedBox(
+                                width: 18,
+                                height: 18,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2)),
                           )
-                        : null,
+                        : _searchCtl.text.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.close, size: 18),
+                                tooltip: 'Clear',
+                                onPressed: () {
+                                  _searchCtl.clear();
+                                  FocusScope.of(context).unfocus();
+                                  setState(() {});
+                                },
+                              )
+                            : null,
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
               ),
-              onChanged: (_) => setState(() {}),
-            ),
-            _RecentSearches(
-              profile: widget.profile,
-              visible: _searchFocus.hasFocus,
-              onPick: (term) {
-                _searchCtl.text = term;
-                _search(term);
-              },
             ),
             const SizedBox(height: 14),
             _VenueChips(
               selected: _selected,
               enabled: !_loading,
+              locating: _locating,
               onSelect: _simulate,
+              onLocation: _useLocation,
             ),
             const SizedBox(height: 22),
             if (_loading)
@@ -622,7 +837,7 @@ class _RecommendTabState extends State<RecommendTab> {
                       ? 'Best at $_searchMerchant'
                       : _selected == null
                           ? 'Best for everyday spend'
-                          : 'Best for ${r.category}',
+                          : 'Best for ${prettyCategory(r.category)}',
                   style: t.textTheme.titleMedium
                       ?.copyWith(color: scheme.onSurfaceVariant),
                 ),
@@ -643,12 +858,12 @@ class _RecommendTabState extends State<RecommendTab> {
                   order: 2,
                 revealed: _revealed,
                   child: Padding(
-                    padding: const EdgeInsets.only(top: 14),
+                    padding: const EdgeInsets.only(top: 24),
                     child: _InfoPill(
                       key: const Key('cap_flag'),
                       kind: _PillKind.cap,
                       text:
-                          'Rewards cap: ${_fmtAmount(r.winner.rec.capAmount!)} per ${_period(r.winner.rec.capPeriod)}',
+                          '${displayIssuer(r.winner.card.issuer)} ${r.winner.card.name} · rewards cap ${_fmtAmount(r.winner.rec.capAmount!)} per ${_period(r.winner.rec.capPeriod)}',
                     ),
                   ),
                 ),
@@ -671,7 +886,7 @@ class _RecommendTabState extends State<RecommendTab> {
                 _Reveal(
                   order: 4,
                 revealed: _revealed,
-                  child: Text('PERKS FOR ${r.category.toUpperCase()}',
+                  child: Text('PERKS FOR ${prettyCategory(r.category).toUpperCase()}',
                       style: t.textTheme.labelSmall),
                 ),
                 const SizedBox(height: 12),
@@ -712,20 +927,14 @@ class _RecommendTabState extends State<RecommendTab> {
             ],
           ],
         ),
-        Positioned(
-          right: 20,
-          bottom: 20,
-          child: _LocationFab(
-            active: _selected == 'location',
-            locating: _locating,
-            onTap: _loading ? null : _useLocation,
-          ),
-        ),
       ],
       ),
     );
   }
 }
+
+/// Never show the internal token "general" — say "everyday spend" (v1.1 copy).
+String prettyCategory(String c) => c == 'general' ? 'everyday spend' : c;
 
 String _labelFor(String? selected, String fallback) {
   if (selected == null || selected == 'location') return fallback;
@@ -743,85 +952,22 @@ String _period(String p) => switch (p) {
     };
 
 // ---------------------------------------------------------------------------
-// Recent searches — shown under the field while focused (toggle in Profile)
-// ---------------------------------------------------------------------------
-
-class _RecentSearches extends StatelessWidget {
-  final ProfileStore profile;
-  final bool visible;
-  final ValueChanged<String> onPick;
-  const _RecentSearches(
-      {required this.profile, required this.visible, required this.onPick});
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: profile,
-      builder: (context, _) {
-        final items = profile.searchHistory;
-        if (!visible || !profile.searchHistoryEnabled || items.isEmpty) {
-          return const SizedBox.shrink();
-        }
-        final t = Theme.of(context);
-        final scheme = t.colorScheme;
-        return Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text('RECENT', style: t.textTheme.labelSmall),
-                  GestureDetector(
-                    onTap: profile.clearSearchHistory,
-                    child: Text('Clear',
-                        style: t.textTheme.labelMedium
-                            ?.copyWith(color: scheme.primary)),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              for (final term in items)
-                InkWell(
-                  onTap: () => onPick(term),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    child: Row(
-                      children: [
-                        Icon(Icons.history,
-                            size: 18, color: scheme.onSurfaceVariant),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(term,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: t.textTheme.bodyMedium),
-                        ),
-                        Icon(Icons.north_west,
-                            size: 15, color: scheme.onSurfaceVariant),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Venue chips — five equal icon-only stadium chips across the gutter
 // ---------------------------------------------------------------------------
 
 class _VenueChips extends StatelessWidget {
   final String? selected;
   final bool enabled;
+  final bool locating;
   final void Function(String label, String category) onSelect;
-  const _VenueChips(
-      {required this.selected, required this.enabled, required this.onSelect});
+  final VoidCallback? onLocation;
+  const _VenueChips({
+    required this.selected,
+    required this.enabled,
+    required this.onSelect,
+    required this.locating,
+    this.onLocation,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -829,6 +975,24 @@ class _VenueChips extends StatelessWidget {
     final tonal = scheme.onSurface.withValues(alpha: 0.06);
     return Row(
       children: [
+        // Current-location chip, first in the row.
+        Expanded(
+          child: Tooltip(
+            message: 'My location',
+            child: _AnimatedChip(
+              key: const Key('chip_location'),
+              icon: Icons.my_location,
+              selected: selected == 'location',
+              busy: locating,
+              tonal: tonal,
+              accent: scheme.primary,
+              onAccent: scheme.onPrimary,
+              muted: scheme.onSurfaceVariant,
+              onTap: enabled ? onLocation : null,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
         for (final entry in simulations.entries) ...[
           Expanded(
             child: Tooltip(
@@ -856,6 +1020,7 @@ class _VenueChips extends StatelessWidget {
 class _AnimatedChip extends StatelessWidget {
   final IconData icon;
   final bool selected;
+  final bool busy;
   final Color tonal, accent, onAccent, muted;
   final VoidCallback? onTap;
   const _AnimatedChip({
@@ -866,69 +1031,36 @@ class _AnimatedChip extends StatelessWidget {
     required this.accent,
     required this.onAccent,
     required this.muted,
+    this.busy = false,
     this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
+    final fg = selected ? onAccent : muted;
     return Opacity(
-      opacity: onTap == null ? 0.4 : 1,
+      opacity: onTap == null && !busy ? 0.4 : 1,
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(999),
-          onTap: onTap,
+          onTap: busy ? null : onTap,
           child: AnimatedContainer(
             duration: ConciergeMotion.chip,
             curve: Curves.easeOut,
             height: 44,
+            alignment: Alignment.center,
             decoration: BoxDecoration(
               color: selected ? accent : tonal,
               borderRadius: BorderRadius.circular(999),
             ),
-            child: Icon(icon, size: 20, color: selected ? onAccent : muted),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Location FAB
-// ---------------------------------------------------------------------------
-
-class _LocationFab extends StatelessWidget {
-  final bool active;
-  final bool locating;
-  final VoidCallback? onTap;
-  const _LocationFab(
-      {required this.active, required this.locating, this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Semantics(
-      button: true,
-      label: 'Use my location',
-      child: Material(
-        color: scheme.primary,
-        shape: const CircleBorder(),
-        elevation: 4,
-        shadowColor: scheme.primary.withValues(alpha: 0.5),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onTap,
-          child: SizedBox(
-            width: 56,
-            height: 56,
-            child: locating
-                ? Padding(
-                    padding: const EdgeInsets.all(18),
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2.4, color: scheme.onPrimary),
+            child: busy
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: fg),
                   )
-                : Icon(Icons.near_me, color: scheme.onPrimary, size: 22),
+                : Icon(icon, size: 20, color: fg),
           ),
         ),
       ),
@@ -951,163 +1083,20 @@ class _ProfileButton extends StatelessWidget {
         onTap: onTap,
         radius: 28,
         child: Container(
-          width: 36,
-          height: 36,
+          width: 42,
+          height: 42,
           decoration: BoxDecoration(
             color: scheme.onSurface.withValues(alpha: 0.06),
             shape: BoxShape.circle,
           ),
           child: Icon(Icons.person_outline,
-              size: 20, color: scheme.onSurfaceVariant),
+              size: 24, color: scheme.onSurfaceVariant),
         ),
       ),
     );
   }
 }
 
-// ===========================================================================
-// Profile screen
-// ===========================================================================
-
-class ProfileScreen extends StatefulWidget {
-  final ProfileStore profile;
-  const ProfileScreen({super.key, required this.profile});
-
-  @override
-  State<ProfileScreen> createState() => _ProfileScreenState();
-}
-
-class _ProfileScreenState extends State<ProfileScreen> {
-  late final TextEditingController _name =
-      TextEditingController(text: widget.profile.name);
-
-  @override
-  void dispose() {
-    _name.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    final scheme = t.colorScheme;
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        foregroundColor: scheme.onSurface,
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-        children: [
-          Text('Profile', style: t.textTheme.displaySmall),
-          const SizedBox(height: 20),
-          Text('YOUR NAME', style: t.textTheme.labelSmall),
-          const SizedBox(height: 8),
-          TextField(
-            key: const Key('profile_name_field'),
-            controller: _name,
-            textInputAction: TextInputAction.done,
-            decoration: const InputDecoration(hintText: 'e.g. Prasad'),
-            onChanged: widget.profile.setName,
-          ),
-          const SizedBox(height: 28),
-          Text('APPEARANCE', style: t.textTheme.labelSmall),
-          const SizedBox(height: 8),
-          AnimatedBuilder(
-            animation: widget.profile,
-            builder: (context, _) => Container(
-              decoration: BoxDecoration(
-                color: scheme.onSurface.withValues(alpha: 0.06),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              padding: const EdgeInsets.all(4),
-              child: Row(
-                children: [
-                  for (final (mode, label, icon) in const [
-                    (ThemeMode.system, 'System', Icons.brightness_auto_outlined),
-                    (ThemeMode.light, 'Light', Icons.light_mode_outlined),
-                    (ThemeMode.dark, 'Dark', Icons.dark_mode_outlined),
-                  ])
-                    Expanded(
-                      child: _ThemeOption(
-                        label: label,
-                        icon: icon,
-                        selected: widget.profile.themeMode == mode,
-                        onTap: () => widget.profile.setThemeMode(mode),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 28),
-          Text('SEARCH', style: t.textTheme.labelSmall),
-          const SizedBox(height: 4),
-          AnimatedBuilder(
-            animation: widget.profile,
-            builder: (context, _) => SwitchListTile(
-              key: const Key('search_history_toggle'),
-              contentPadding: EdgeInsets.zero,
-              title: Text('Save recent searches', style: t.textTheme.bodyMedium),
-              subtitle: Text('Show your last 10 searches under the search bar.',
-                  style: t.textTheme.bodySmall
-                      ?.copyWith(color: scheme.onSurfaceVariant)),
-              value: widget.profile.searchHistoryEnabled,
-              onChanged: widget.profile.setSearchHistoryEnabled,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ThemeOption extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final bool selected;
-  final VoidCallback onTap;
-  const _ThemeOption({
-    required this.label,
-    required this.icon,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    final scheme = t.colorScheme;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(11),
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: ConciergeMotion.chip,
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            color: selected ? scheme.primary : Colors.transparent,
-            borderRadius: BorderRadius.circular(11),
-          ),
-          child: Column(
-            children: [
-              Icon(icon,
-                  size: 20,
-                  color: selected ? scheme.onPrimary : scheme.onSurfaceVariant),
-              const SizedBox(height: 4),
-              Text(label,
-                  style: t.textTheme.labelMedium?.copyWith(
-                      color:
-                          selected ? scheme.onPrimary : scheme.onSurfaceVariant)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Staggered entrance (fade + rise); collapses to a fade under reduce-motion
@@ -1235,12 +1224,12 @@ class _RankedDeckState extends State<_RankedDeck> {
                 right: 8.0 * i,
                 height: winnerH,
                 child: i == 0
-                    ? _CardVisual(
+                    ? CardVisual(
                         card: _order.first.card,
                         headline:
                             '${(_order.first.rec.effectiveRate * 100).toStringAsFixed(2)}%',
                         caption: widget.winnerCaption ??
-                            'back on ${widget.category}',
+                            'back on ${prettyCategory(widget.category)}',
                       )
                     : GestureDetector(
                         onTap: () => _promote(i),
@@ -1271,7 +1260,7 @@ class _BackCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final x = Theme.of(context).extension<ConciergeColors>()!;
-    final (a, b) = _faceColors(ranked.card);
+    final (a, b) = faceColors(ranked.card);
     return ClipRRect(
       key: Key('rank_$rank'),
       borderRadius: BorderRadius.circular(14),
@@ -1312,7 +1301,7 @@ class _BackCard extends StatelessWidget {
                               fontSize: 12.5,
                               fontWeight: FontWeight.w600,
                               color: Colors.white)),
-                      Text(ranked.card.issuer,
+                      Text(displayIssuer(ranked.card.issuer),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -1404,7 +1393,7 @@ class _OfferTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = Theme.of(context);
     final scheme = t.colorScheme;
-    final swatch = _parseHex(offer.colorPrimary);
+    final swatch = parseHex(offer.colorPrimary);
     return Container(
       key: const Key('offer'),
       margin: const EdgeInsets.only(bottom: 10),
@@ -1692,7 +1681,7 @@ class _EmptyCategory extends StatelessWidget {
         children: [
           _GhostCard(),
           const SizedBox(height: 20),
-          Text(status ?? 'No card in your wallet covers $category yet.',
+          Text(status ?? 'No card in your wallet covers ${prettyCategory(category)} yet.',
               textAlign: TextAlign.center,
               style: t.textTheme.titleMedium
                   ?.copyWith(color: t.colorScheme.onSurfaceVariant)),
@@ -1771,306 +1760,6 @@ class _DashPainter extends CustomPainter {
       old.color != color || old.radius != radius;
 }
 
-// ---------------------------------------------------------------------------
-// Card face colors
-// ---------------------------------------------------------------------------
-
-const _fallbackFaces = [
-  (Color(0xFF16161F), Color(0xFF2E2E48)), // midnight
-  (Color(0xFF0C312D), Color(0xFF1E5F55)), // deep teal
-  (Color(0xFF2E1622), Color(0xFF61344A)), // wine
-  (Color(0xFF1F2A34), Color(0xFF3F5666)), // slate
-];
-
-Color? _parseHex(String? hex) {
-  if (hex == null || hex.length != 7 || !hex.startsWith('#')) return null;
-  final v = int.tryParse(hex.substring(1), radix: 16);
-  return v == null ? null : Color(0xFF000000 | v);
-}
-
-/// Two face hexes from ingestion, else a stable issuer-hashed fallback pair.
-(Color, Color) _faceColors(CardInfo card) {
-  final a = _parseHex(card.colorPrimary);
-  if (a == null) {
-    return _fallbackFaces[card.issuer.hashCode.abs() % _fallbackFaces.length];
-  }
-  final b = _parseHex(card.colorSecondary) ??
-      HSLColor.fromColor(a)
-          .withLightness(
-              (HSLColor.fromColor(a).lightness * 1.35).clamp(0.0, 1.0))
-          .toColor();
-  return (a, b);
-}
-
-// ---------------------------------------------------------------------------
-// The card visual (hero)
-// ---------------------------------------------------------------------------
-
-class _CardVisual extends StatelessWidget {
-  final CardInfo card;
-  final String? headline; // e.g. "5.00%"
-  final String? caption; // e.g. "back on dining"
-  final VoidCallback? onRemove;
-
-  const _CardVisual({
-    required this.card,
-    this.headline,
-    this.caption,
-    this.onRemove,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    final (a, b) = _faceColors(card);
-    final ink = cardInk(a, b);
-    final inkSoft = ink.withValues(alpha: 0.72);
-    final inkFaint = ink.withValues(alpha: 0.5);
-    final lightFace = ink != Colors.white;
-
-    final semantics = headline != null
-        ? 'Best card for ${caption?.replaceFirst('back on ', '') ?? ''}: '
-            '${card.issuer} ${card.name}, $headline back'
-        : '${card.issuer} ${card.name}';
-
-    return Semantics(
-      label: semantics,
-      child: AspectRatio(
-        aspectRatio: kCardAspect,
-        child: Container(
-          key: headline != null ? const Key('best_card') : null,
-          padding: const EdgeInsets.fromLTRB(18, 15, 15, 15),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(kCardRadius),
-            gradient: cardFace(a, b),
-            // Light faces get a hairline so they don't dissolve into surfaces.
-            border: lightFace
-                ? Border.all(color: t.colorScheme.outline)
-                : null,
-            boxShadow: [
-              BoxShadow(
-                color: (t.brightness == Brightness.dark
-                        ? Colors.black
-                        : const Color(0xFF272219))
-                    .withValues(
-                        alpha: t.brightness == Brightness.dark ? 0.75 : 0.45),
-                blurRadius: 40,
-                spreadRadius: -18,
-                offset: const Offset(0, 18),
-              ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: Text(card.issuer.toUpperCase(),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            fontSize: 11.5,
-                            letterSpacing: 1.84,
-                            fontWeight: FontWeight.w600,
-                            color: inkSoft)),
-                  ),
-                  _Contactless(color: inkFaint),
-                  if (onRemove != null) ...[
-                    const SizedBox(width: 8),
-                    GestureDetector(
-                      key: Key('remove_${card.id}'),
-                      onTap: onRemove,
-                      child: Container(
-                        width: 26,
-                        height: 26,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: ink.withValues(alpha: 0.18),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(Icons.close, size: 15, color: ink),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 12),
-              _EmvChip(),
-              const Spacer(),
-              if (headline != null)
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(headline!,
-                        style: t.textTheme.headlineLarge?.copyWith(color: ink)),
-                    const SizedBox(width: 8),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: Text(caption ?? '',
-                          style: TextStyle(
-                              fontSize: 13,
-                              color: ink.withValues(alpha: 0.88))),
-                    ),
-                  ],
-                )
-              else
-                Text('••••  ••••  ••••  ••••',
-                    style: TextStyle(
-                        fontSize: 13,
-                        letterSpacing: 2.1,
-                        fontWeight: FontWeight.w600,
-                        color: ink.withValues(alpha: 0.62))),
-              const SizedBox(height: 10),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: Text(card.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            fontSize: 14.5,
-                            fontWeight: FontWeight.w600,
-                            color: ink)),
-                  ),
-                  const SizedBox(width: 8),
-                  _NetworkMark(network: card.network, ink: ink),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Contactless: three nested arcs.
-class _Contactless extends StatelessWidget {
-  final Color color;
-  const _Contactless({required this.color});
-
-  @override
-  Widget build(BuildContext context) =>
-      CustomPaint(size: const Size(18, 18), painter: _ContactlessPainter(color));
-}
-
-class _ContactlessPainter extends CustomPainter {
-  final Color color;
-  _ContactlessPainter(this.color);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.9
-      ..strokeCap = StrokeCap.round;
-    final center = Offset(size.width * 0.1, size.height / 2);
-    for (int i = 1; i <= 3; i++) {
-      final r = size.width * 0.28 * i;
-      canvas.drawArc(
-          Rect.fromCircle(center: center, radius: r), -0.7, 1.4, false, paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _ContactlessPainter old) => old.color != color;
-}
-
-/// EMV chip: gold rounded rectangle with contact lines.
-class _EmvChip extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 36,
-      height: 27,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(6),
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFFE8CE8F), Color(0xFFC79E52)],
-        ),
-      ),
-      child: CustomPaint(painter: _ChipLines()),
-    );
-  }
-}
-
-class _ChipLines extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = const Color(0x55432F00)
-      ..strokeWidth = 1;
-    canvas.drawLine(Offset(size.width / 2, 0),
-        Offset(size.width / 2, size.height), paint);
-    canvas.drawLine(Offset(0, size.height / 2),
-        Offset(size.width, size.height / 2), paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter old) => false;
-}
-
-class _NetworkMark extends StatelessWidget {
-  final String network;
-  final Color ink;
-  const _NetworkMark({required this.network, this.ink = Colors.white});
-
-  @override
-  Widget build(BuildContext context) {
-    switch (network) {
-      case 'mastercard':
-        return SizedBox(
-          width: 38,
-          height: 24,
-          child: Stack(
-            children: [
-              Positioned(
-                left: 0,
-                child: Container(
-                    width: 24,
-                    height: 24,
-                    decoration: BoxDecoration(
-                        color: const Color(0xFFEB001B).withValues(alpha: 0.9),
-                        shape: BoxShape.circle)),
-              ),
-              Positioned(
-                right: 0,
-                child: Container(
-                    width: 24,
-                    height: 24,
-                    decoration: BoxDecoration(
-                        color: const Color(0xFFF79E1B).withValues(alpha: 0.85),
-                        shape: BoxShape.circle)),
-              ),
-            ],
-          ),
-        );
-      case 'visa':
-        return Text('VISA',
-            style: TextStyle(
-                fontSize: 16,
-                color: ink,
-                fontStyle: FontStyle.italic,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0.5));
-      case 'amex':
-        return Text('AMEX',
-            style: TextStyle(
-                fontSize: 14,
-                color: ink,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 1));
-      default:
-        return const SizedBox.shrink();
-    }
-  }
-}
 
 // ===========================================================================
 // Wallet tab
@@ -2194,7 +1883,6 @@ class _WalletTabState extends State<WalletTab> {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
-    final scheme = t.colorScheme;
     final held = _held;
     return Stack(
       children: [
@@ -2206,15 +1894,11 @@ class _WalletTabState extends State<WalletTab> {
                     padding: const EdgeInsets.fromLTRB(20, 12, 20, 130),
                     children: [
                       Text('Wallet', style: t.textTheme.displaySmall),
-                      const SizedBox(height: 2),
-                      Text('Tap ✕ on a card to remove it.',
-                          style: t.textTheme.bodyMedium
-                              ?.copyWith(color: scheme.onSurfaceVariant)),
                       const SizedBox(height: 18),
                       for (final c in held)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 14),
-                          child: _CardVisual(
+                          child: CardVisual(
                               card: c, onRemove: () => _confirmRemove(c)),
                         ),
                     ],
@@ -2377,8 +2061,8 @@ class _AddCardSheetState extends State<_AddCardSheet> {
           const SizedBox(height: 18),
           Text('Add a card',
               style: GoogleFontsSafe.title(t)),
-          const SizedBox(height: 4),
-          Text('Type the card name — its rewards are found and added for you.',
+          const SizedBox(height: 5),
+          Text('Type the card name. We find its rewards.',
               style: t.textTheme.bodyMedium
                   ?.copyWith(color: scheme.onSurfaceVariant)),
           const SizedBox(height: 16),

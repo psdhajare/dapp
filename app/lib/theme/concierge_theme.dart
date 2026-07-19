@@ -107,9 +107,9 @@ const _dark = ColorScheme(
 
 TextTheme _text(ColorScheme s) => TextTheme(
     displaySmall: GoogleFonts.newsreader(
-        fontSize: 33, fontWeight: FontWeight.w500, height: 1.1, color: s.onSurface),
+        fontSize: 31, fontWeight: FontWeight.w500, height: 1.1, color: s.onSurface),
     headlineLarge: GoogleFonts.newsreader(
-        fontSize: 43,
+        fontSize: 40,
         fontWeight: FontWeight.w500,
         height: 1.0,
         color: s.onSurface,
@@ -168,8 +168,9 @@ ThemeData conciergeTheme(Brightness brightness) {
           backgroundColor: Colors.transparent,
           elevation: 0,
           indicatorColor: Colors.transparent,
+          labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
           iconTheme: WidgetStateProperty.resolveWith((st) => IconThemeData(
-              size: 21,
+              size: 22,
               color: st.contains(WidgetState.selected)
                   ? s.primary
                   : s.onSurfaceVariant)),
