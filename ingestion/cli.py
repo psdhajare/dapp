@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import discover
+from . import cardkey, discover
 from .db import Database
 from .extract import Extraction, extract_all
 from .llm import get_client
@@ -33,16 +33,34 @@ def run_auto(card_name: str, db_path: str, provider: str | None,
     [country] biases the web search to the user's market for accuracy. Also
     pulls a fees/rates page, since APR, annual fee and income requirements
     usually live there rather than on the marketing page.
+
+    Tries several candidate documents and VERIFIES the extracted card actually
+    matches the requested name — discovery can rank a different card's page
+    first, and we must never return the wrong card.
     """
-    url = url or discover.find_doc_url(card_name, country)
-    print(f"Doc: {url}")
-    text = discover.fetch_text(url)
-    if not text.strip():
-        raise ValueError(f"empty document at {url}")
-    # Keep room for the rates text so it isn't truncated away.
-    text = text[:26000] + "\n\n" + _fees_text(card_name, country=country)
-    return _ingest(text[:discover.MAX_DOC_CHARS], source_ref=url,
-                   db_path=db_path, provider=provider, client=client)
+    client = client or get_client(provider)
+    candidates = [url] if url else discover.find_doc_urls(card_name, country)
+    if not candidates:
+        raise LookupError(f"no search results for: {card_name}")
+    fees = "" if url else _fees_text(card_name, country=country)
+    for u in candidates[:4]:
+        try:
+            doc = discover.fetch_text(u)
+        except Exception:
+            continue
+        if not doc.strip():
+            continue
+        text = (doc[:26000] + "\n\n" + fees)[:discover.MAX_DOC_CHARS]
+        try:
+            results = extract_all(text, client, source_ref=u)
+        except LookupError:
+            continue
+        # Explicit url is trusted; otherwise the card must match the query.
+        if url or cardkey.matches(
+                card_name, f"{results[0].card.name} {results[0].card.issuer}"):
+            print(f"Doc: {u}")
+            return _persist(results, db_path)
+    raise LookupError(f"no matching card found for: {card_name}")
 
 
 # Phrases that mark where the interest rate actually appears on a page.
@@ -104,9 +122,12 @@ def _fees_text(card_name: str, limit: int = 16000, country: str = "") -> str:
 
 def _ingest(text: str, source_ref: str, db_path: str,
             provider: str | None, client=None) -> list[Extraction]:
+    """Extract from given text and persist (local-file path)."""
     client = client or get_client(provider)
-    results = extract_all(text, client, source_ref=source_ref)
+    return _persist(extract_all(text, client, source_ref=source_ref), db_path)
 
+
+def _persist(results: list[Extraction], db_path: str) -> list[Extraction]:
     db = Database(db_path)
     db.init_schema_if_needed()
     for result in results:

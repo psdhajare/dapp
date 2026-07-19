@@ -158,11 +158,10 @@ def rank_urls(urls: list[str], card_name: str) -> list[str]:
     return sorted(urls, key=score, reverse=True)
 
 
-def find_doc_url(card_name: str, country: str = "") -> str:
-    """Best official-looking URL for the card's rewards/terms doc.
-
-    Tries several query shapes (a single over-specified query often returns zero
-    results) and only fails if none do."""
+def find_doc_urls(card_name: str, country: str = "", n: int = 6) -> list[str]:
+    """Ranked candidate doc URLs for the card. Tries several query shapes (a
+    single over-specified query often returns zero results). The caller should
+    verify the extracted card matches, trying the next candidate if not."""
     c = f" {country}" if country else ""
     queries = [
         f"{card_name}{c}",
@@ -178,11 +177,17 @@ def find_doc_url(card_name: str, country: str = "") -> str:
                     seen.append(u)
         except Exception:
             continue
-        if len(seen) >= 5:
+        if len(seen) >= 8:
             break
-    if not seen:
+    return rank_urls(seen, card_name)[:n]
+
+
+def find_doc_url(card_name: str, country: str = "") -> str:
+    """Single best doc URL (raises if none)."""
+    urls = find_doc_urls(card_name, country, n=1)
+    if not urls:
         raise LookupError(f"no search results for: {card_name}")
-    return rank_urls(seen, card_name)[0]
+    return urls[0]
 
 
 class _TextExtractor(HTMLParser):

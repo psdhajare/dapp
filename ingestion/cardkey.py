@@ -33,12 +33,26 @@ _STOP = {
 }
 
 
+def _norm_tokens(s: str) -> set[str]:
+    """Distinctive, alias-expanded tokens of a card name/query."""
+    s = s.lower()
+    for alias, full in _ALIASES.items():
+        s = re.sub(rf"\b{alias}\b", full, s)
+    return {w for w in re.split(r"[^a-z0-9]+", s) if w and w not in _STOP}
+
+
 def card_key(name: str) -> str:
     """Stable key: alias-expanded, generic words dropped, distinctive tokens
     sorted. Country-independent — the card is the same product everywhere."""
-    s = name.lower()
-    for alias, full in _ALIASES.items():
-        s = re.sub(rf"\b{alias}\b", full, s)
-    tokens = sorted(
-        {w for w in re.split(r"[^a-z0-9]+", s) if w and w not in _STOP})
-    return " ".join(tokens)
+    return " ".join(sorted(_norm_tokens(name)))
+
+
+def matches(query: str, card_text: str, threshold: float = 0.6) -> bool:
+    """True if the extracted card plausibly IS the card the user searched for:
+    most of the query's distinctive tokens appear in the card's name+issuer.
+    Guards against discovery returning a wrong card's document."""
+    q = _norm_tokens(query)
+    if not q:
+        return True
+    hit = len(q & _norm_tokens(card_text))
+    return hit / len(q) >= threshold

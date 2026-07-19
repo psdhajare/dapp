@@ -29,8 +29,8 @@ DUO = json.dumps({
 
 
 def test_run_auto_whole_flow(tmp_path, monkeypatch):
-    monkeypatch.setattr(discover, "find_doc_url",
-                        lambda name, country="": "https://www.emiratesnbd.com/duo")
+    monkeypatch.setattr(discover, "find_doc_urls",
+                        lambda name, country="", n=6: ["https://www.emiratesnbd.com/duo"])
     monkeypatch.setattr(discover, "fetch_text",
                         lambda url: "Duo card 2% dining cashback capped AED 2000/month")
 
@@ -69,7 +69,8 @@ DUO_MULTI = json.dumps({
 
 
 def test_run_auto_multi_card_bundle(tmp_path, monkeypatch):
-    monkeypatch.setattr(discover, "find_doc_url", lambda name, country="": "https://enbd/duo")
+    monkeypatch.setattr(discover, "find_doc_urls",
+                        lambda name, country="", n=6: ["https://enbd/duo"])
     monkeypatch.setattr(discover, "fetch_text", lambda url: "Duo dual-card set")
 
     db_path = tmp_path / "cards.db"
@@ -85,10 +86,26 @@ def test_run_auto_multi_card_bundle(tmp_path, monkeypatch):
 
 
 def test_run_auto_rejects_empty_doc(tmp_path, monkeypatch):
-    monkeypatch.setattr(discover, "find_doc_url", lambda name, country="": "https://x.com")
+    monkeypatch.setattr(discover, "find_doc_urls",
+                        lambda name, country="", n=6: ["https://x.com"])
     monkeypatch.setattr(discover, "fetch_text", lambda url: "   ")
-    with pytest.raises(ValueError):
+    with pytest.raises(LookupError):
         run_auto("X", str(tmp_path / "c.db"), provider=None, client=FakeLLM("{}"))
+
+
+def test_run_auto_rejects_wrong_card(tmp_path, monkeypatch):
+    # Discovery returns a page for a DIFFERENT card -> must not be accepted.
+    monkeypatch.setattr(discover, "find_doc_urls",
+                        lambda name, country="", n=6: ["https://x/skywards"])
+    monkeypatch.setattr(discover, "fetch_text", lambda url: "some card doc")
+    wrong = json.dumps({
+        "card": {"id": "sky", "name": "Emirates Skywards World Elite",
+                 "issuer": "Barclays Bank Delaware", "network": "mastercard",
+                 "currency": "USD", "annual_fee": 499},
+        "rules": [], "points_valuation": None})
+    with pytest.raises(LookupError):
+        run_auto("Emirates NBD Mastercard Platinum Credit Card",
+                 str(tmp_path / "c.db"), provider=None, client=FakeLLM(wrong))
 
 
 def test_run_auto_explicit_url_skips_search(tmp_path, monkeypatch):
