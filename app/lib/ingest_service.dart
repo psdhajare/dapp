@@ -23,8 +23,10 @@ class IngestService {
 
   /// Returns one extraction payload per physical card (a product can be a
   /// bundle of several). Each: {card, rules, valuation, offers, warnings}.
-  Future<List<Map<String, dynamic>>> ingest(String cardName) async {
-    final body = await _post(endpoint, {'card': cardName});
+  /// [country] biases the web search to the user's market for accuracy.
+  Future<List<Map<String, dynamic>>> ingest(String cardName,
+      {String country = ''}) async {
+    final body = await _post(endpoint, {'card': cardName, 'country': country});
     final cards = body['cards'] as List? ?? [body]; // tolerate legacy shape
     return cards.cast<Map<String, dynamic>>();
   }
@@ -34,9 +36,9 @@ class IngestService {
   /// [cards] are the user's held card names, used to target loyalty-program
   /// offers (e.g. Wio → Entertainer); not persisted server-side.
   Future<Map<String, dynamic>> search(String merchant,
-          {List<String> cards = const []}) =>
+          {List<String> cards = const [], String country = ''}) =>
       _post(endpoint.replace(path: '/search'),
-          {'merchant': merchant, 'cards': cards});
+          {'merchant': merchant, 'cards': cards, 'country': country});
 
   Future<Map<String, dynamic>> _post(Uri url, Map<String, dynamic> json) async {
     final http.Response resp;

@@ -120,13 +120,24 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self._send(500, {"error": "server_error", "detail": f"{type(e).__name__}: {e}"})
 
+    def _optional_country(self, req: dict) -> str:
+        """Sanitized country hint for search context; '' if absent/invalid."""
+        raw = req.get("country")
+        if not raw:
+            return ""
+        try:
+            return sanitize_query(raw)
+        except InputError:
+            return ""
+
     def _handle_ingest(self):
         req = self._read_json()
         # sanitize_query raises InputError (-> 400) on empty/oversized/malicious.
         # NOTE: client-supplied 'url' is intentionally ignored here (SSRF guard);
         # the server always discovers the doc URL itself.
         card_name = sanitize_query(req.get("card"))
-        results = run_auto(card_name, DB_PATH, provider=None)
+        results = run_auto(card_name, DB_PATH, provider=None,
+                           country=self._optional_country(req))
         # A product can be a bundle of >1 physical card (e.g. a dual-card set).
         self._send(200, {"cards": [extraction_to_dict(e) for e in results]})
 
@@ -143,15 +154,17 @@ class Handler(BaseHTTPRequestHandler):
                     cards.append(sanitize_query(c))
                 except InputError:
                     continue
-        # Cache depends on which programs the cards grant (not identity).
+        country = self._optional_country(req)
+        # Cache depends on the market + which programs the cards grant.
         progs = programs_for_cards(cards)
-        key = merchant.lower() + "|" + ",".join(sorted(progs))
+        key = merchant.lower() + "|" + country.lower() + "|" + ",".join(sorted(progs))
         cached = _cache_get(key)
         if cached is not None:
             self._send(200, dict(cached, cached=True))
             return
         # No client 'url' override (SSRF guard) — pipeline finds it itself.
-        result = find_merchant_offers(merchant, get_client(), cards=cards)
+        result = find_merchant_offers(merchant, get_client(), cards=cards,
+                                      country=country)
         payload = result_to_dict(result)
         # Cache a real hit for a day; a miss only briefly so it retries soon.
         ttl = CACHE_TTL if payload.get("offers") else MISS_CACHE_TTL

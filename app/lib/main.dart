@@ -185,6 +185,7 @@ class _RootScreenState extends State<RootScreen> {
               dao: widget.dao,
               ingest: widget.ingest,
               analytics: widget.analytics,
+              profile: widget.profile,
               onWalletChanged: () =>
                   _recommendKey.currentState?.refreshAfterWalletChange(),
             ),
@@ -441,7 +442,7 @@ class _RecommendTabState extends State<RecommendTab>
     final colors = {for (final c in all) c.id: (c.colorPrimary, c.colorSecondary)};
     for (final c in held) {
       try {
-        final cards = await ingest.ingest(c.name);
+        final cards = await ingest.ingest(c.name, country: widget.profile.country);
         for (final data in cards) {
           final id = (data['card'] as Map)['id'];
           final existing = colors[id];
@@ -510,7 +511,8 @@ class _RecommendTabState extends State<RecommendTab>
           .where((c) => c.held)
           .map((c) => '${displayIssuer(c.issuer)} ${c.name}'.trim())
           .toList();
-      final data = await ingest.search(merchant, cards: held);
+      final data = await ingest.search(merchant,
+          cards: held, country: widget.profile.country);
       // Cache a real hit for a day; a miss only briefly so it retries soon and
       // a genuine offer is never hidden for long.
       final hasOffers = (data['offers'] as List?)?.isNotEmpty ?? false;
@@ -2395,12 +2397,14 @@ class WalletTab extends StatefulWidget {
   final CardDao dao;
   final IngestService? ingest;
   final Analytics analytics;
+  final ProfileStore profile;
   final VoidCallback? onWalletChanged;
 
   const WalletTab({
     super.key,
     required this.dao,
     required this.analytics,
+    required this.profile,
     this.ingest,
     this.onWalletChanged,
   });
@@ -2457,7 +2461,10 @@ class _WalletTabState extends State<WalletTab> {
       context: context,
       isScrollControlled: true,
       builder: (_) => _AddCardSheet(
-          dao: widget.dao, ingest: widget.ingest, analytics: widget.analytics),
+          dao: widget.dao,
+          ingest: widget.ingest,
+          analytics: widget.analytics,
+          country: widget.profile.country),
     );
     if (added == true) {
       await _load();
@@ -2616,8 +2623,12 @@ class _AddCardSheet extends StatefulWidget {
   final CardDao dao;
   final IngestService? ingest;
   final Analytics analytics;
+  final String country;
   const _AddCardSheet(
-      {required this.dao, required this.analytics, this.ingest});
+      {required this.dao,
+      required this.analytics,
+      required this.country,
+      this.ingest});
 
   @override
   State<_AddCardSheet> createState() => _AddCardSheetState();
@@ -2665,7 +2676,7 @@ class _AddCardSheetState extends State<_AddCardSheet> {
       _error = null;
     });
     try {
-      final cards = await ingest.ingest(name);
+      final cards = await ingest.ingest(name, country: widget.country);
       setState(() {
         _busy = false;
         _fetched = cards;

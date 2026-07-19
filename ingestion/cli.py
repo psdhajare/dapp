@@ -26,20 +26,21 @@ def run(path: str, db_path: str, provider: str | None,
 
 
 def run_auto(card_name: str, db_path: str, provider: str | None,
-             client=None, url: str | None = None) -> list[Extraction]:
+             client=None, url: str | None = None,
+             country: str = "") -> list[Extraction]:
     """Whole flow: card name -> find official doc -> fetch -> extract -> DB.
 
-    Also pulls a fees/rates page, since APR, annual fee and income requirements
-    usually live there rather than on the marketing page — key facts the user
-    must see, so it's worth the extra fetch.
+    [country] biases the web search to the user's market for accuracy. Also
+    pulls a fees/rates page, since APR, annual fee and income requirements
+    usually live there rather than on the marketing page.
     """
-    url = url or discover.find_doc_url(card_name)
+    url = url or discover.find_doc_url(card_name, country)
     print(f"Doc: {url}")
     text = discover.fetch_text(url)
     if not text.strip():
         raise ValueError(f"empty document at {url}")
     # Keep room for the rates text so it isn't truncated away.
-    text = text[:26000] + "\n\n" + _fees_text(card_name)
+    text = text[:26000] + "\n\n" + _fees_text(card_name, country=country)
     return _ingest(text[:discover.MAX_DOC_CHARS], source_ref=url,
                    db_path=db_path, provider=provider, client=client)
 
@@ -63,7 +64,7 @@ def _rate_window(text: str) -> str:
     return ""
 
 
-def _fees_text(card_name: str, limit: int = 16000) -> str:
+def _fees_text(card_name: str, limit: int = 16000, country: str = "") -> str:
     """Best-effort text of the card's rate/fee pages (APR, fees, salary).
 
     APR lives on a Key-Facts / Schedule-of-Charges / MITC page (often a long
@@ -71,12 +72,13 @@ def _fees_text(card_name: str, limit: int = 16000) -> str:
     window around the rate on each rate-bearing page, so the figure isn't lost
     to truncation. Worth the extra fetches — add-card is infrequent.
     """
+    c = f" {country}" if country else ""
     queries = (
-        f"{card_name} MITC rate of interest",
-        f"{card_name} interest rate per month",
-        f"{card_name} fees and charges",
-        f"{card_name} schedule of charges",
-        f"{card_name} key facts statement",
+        f"{card_name} MITC rate of interest{c}",
+        f"{card_name} interest rate per month{c}",
+        f"{card_name} fees and charges{c}",
+        f"{card_name} schedule of charges{c}",
+        f"{card_name} key facts statement{c}",
     )
     seen: list[str] = []
     for q in queries:

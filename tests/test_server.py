@@ -15,7 +15,8 @@ from ingestion.models import Card, Offer, RewardRule
 
 @pytest.fixture
 def running_server(monkeypatch, tmp_path):
-    def fake_run_auto(card_name, db_path, provider=None, url=None, client=None):
+    def fake_run_auto(card_name, db_path, provider=None, url=None, client=None,
+                      country=""):
         if card_name == "Broken Card":
             raise LookupError("no search results")
         card = Card(id="test_card", name=card_name, issuer="Test Bank", network="visa")
@@ -31,7 +32,7 @@ def running_server(monkeypatch, tmp_path):
     # Count how many times the (expensive) merchant pipeline runs.
     calls = {"n": 0}
 
-    def fake_find(merchant, client, url=None, cards=None):
+    def fake_find(merchant, client, url=None, cards=None, country=""):
         calls["n"] += 1
         return MerchantResult(
             merchant=merchant, category="beauty",

@@ -117,15 +117,16 @@ def _rank_offer_urls(urls: list[str], merchant: str) -> list[str]:
     return sorted(urls, key=score, reverse=True)
 
 
-def _gather_urls(merchant: str) -> list[str]:
+def _gather_urls(merchant: str, country: str = "") -> list[str]:
     """Merge results from several offer-focused queries, de-duped. More angles
     raise recall so we don't miss the one page that lists the offer."""
     seen: list[str] = []
+    loc = country or "UAE"
     queries = (
-        f'"{merchant}" credit card offer',
-        f"{merchant} card discount deal",
-        f"{merchant} bank offer promotion",
-        f"{merchant} cashback credit card UAE",
+        f'"{merchant}" credit card offer {loc}',
+        f"{merchant} card discount deal {loc}",
+        f"{merchant} bank offer promotion {loc}",
+        f"{merchant} cashback credit card {loc}",
     )
     for q in queries:
         try:
@@ -146,7 +147,8 @@ def _dedupe_words(s: str) -> str:
     return " ".join(out)
 
 
-def _program_offers(merchant: str, cards: list[str] | None) -> list[MerchantOffer]:
+def _program_offers(merchant: str, cards: list[str] | None,
+                    country: str = "") -> list[MerchantOffer]:
     """Offers delivered by loyalty programs the user's cards grant, when the
     merchant participates. Only granted programs are checked (no waste)."""
     if not cards:
@@ -156,7 +158,8 @@ def _program_offers(merchant: str, cards: list[str] | None) -> list[MerchantOffe
         return []
     with ThreadPoolExecutor(max_workers=len(keys)) as pool:
         members = list(pool.map(
-            lambda k: (k, programs.merchant_on_program(merchant, k)), keys))
+            lambda k: (k, programs.merchant_on_program(merchant, k, country=country)),
+            keys))
     out: list[MerchantOffer] = []
     for key, is_member in members:
         if not is_member:
@@ -177,7 +180,7 @@ def _program_offers(merchant: str, cards: list[str] | None) -> list[MerchantOffe
 
 def find_merchant_offers(
     merchant: str, client: LLMClient, url: str | None = None,
-    cards: list[str] | None = None,
+    cards: list[str] | None = None, country: str = "",
 ) -> MerchantResult:
     """Search the web for the merchant and extract card offers via the LLM.
 
@@ -197,7 +200,8 @@ def find_merchant_offers(
         if url:
             urls = [url]
         else:
-            urls = _rank_offer_urls(_gather_urls(merchant), merchant)[:_MAX_CANDIDATES]
+            urls = _rank_offer_urls(
+                _gather_urls(merchant, country), merchant)[:_MAX_CANDIDATES]
 
         def _fetch(u: str) -> str:
             try:
@@ -251,7 +255,7 @@ def find_merchant_offers(
 
     # Program offers (Wio → Entertainer, …) — checked even with no direct text,
     # since these often live on no bank page. Wallet-relevant, so listed first.
-    program_offers = _program_offers(merchant, cards)
+    program_offers = _program_offers(merchant, cards, country)
 
     return MerchantResult(
         merchant=merchant, category=category,

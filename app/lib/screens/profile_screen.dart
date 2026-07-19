@@ -6,6 +6,17 @@ import '../analytics.dart';
 import '../profile_store.dart';
 import '../theme/concierge_theme.dart';
 
+/// Markets we search offers/rates for. UAE-first, then the wider GCC + common
+/// expat home countries.
+const kCountries = <String>[
+  'United Arab Emirates', 'Saudi Arabia', 'Qatar', 'Kuwait', 'Bahrain', 'Oman',
+  'India', 'Pakistan', 'United Kingdom', 'United States', 'Singapore',
+];
+
+const kCurrencies = <String>[
+  'AED', 'SAR', 'QAR', 'KWD', 'BHD', 'OMR', 'INR', 'PKR', 'GBP', 'USD', 'SGD',
+];
+
 class ProfileScreen extends StatefulWidget {
   final ProfileStore profile;
   final Analytics analytics;
@@ -109,6 +120,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
             builder: (context, _) => _SegmentedTheme(
               value: widget.profile.themeMode,
               onChanged: widget.profile.setThemeMode,
+            ),
+          ),
+
+          // REGION — sharpens offer/rate searches to your market.
+          const _Eyebrow('REGION'),
+          AnimatedBuilder(
+            animation: widget.profile,
+            builder: (context, _) => _SurfaceCard(
+              children: [
+                _DropdownRow(
+                  title: 'Country',
+                  value: widget.profile.country,
+                  options: kCountries,
+                  onChanged: (v) => widget.profile.setCountry(v),
+                ),
+                const _InsetDivider(),
+                _DropdownRow(
+                  title: 'Primary currency',
+                  value: widget.profile.currency,
+                  options: kCurrencies,
+                  onChanged: (v) => widget.profile.setCurrency(v),
+                ),
+              ],
             ),
           ),
 
@@ -395,6 +429,54 @@ class _InsetDivider extends StatelessWidget {
 // ---------------------------------------------------------------------------
 // Rows (all ≥48px)
 // ---------------------------------------------------------------------------
+
+class _DropdownRow extends StatelessWidget {
+  final String title;
+  final String value;
+  final List<String> options;
+  final ValueChanged<String> onChanged;
+  const _DropdownRow({
+    required this.title,
+    required this.value,
+    required this.options,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final scheme = t.colorScheme;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 48),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Row(
+          children: [
+            Expanded(child: Text(title, style: t.textTheme.titleSmall)),
+            const SizedBox(width: 12),
+            DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: options.contains(value) ? value : null,
+                isDense: true,
+                borderRadius: BorderRadius.circular(12),
+                icon: Icon(Icons.expand_more,
+                    size: 18, color: scheme.onSurfaceVariant),
+                style: t.textTheme.titleSmall?.copyWith(color: scheme.primary),
+                items: [
+                  for (final o in options)
+                    DropdownMenuItem(value: o, child: Text(o)),
+                ],
+                onChanged: (v) {
+                  if (v != null) onChanged(v);
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _SwitchRow extends StatelessWidget {
   final String title;

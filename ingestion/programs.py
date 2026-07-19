@@ -88,7 +88,7 @@ def granting_cards(program: str, cards: list[str]) -> list[str]:
 
 
 def merchant_on_program(merchant: str, program: str,
-                        timeout: int = 12) -> bool:
+                        timeout: int = 12, country: str = "") -> bool:
     """True only if this SPECIFIC merchant has its own outlet page on the
     program's site. We require ALL distinctive merchant tokens to appear in the
     member-domain URL's own path (slug) — a non-member has no such outlet URL,
@@ -100,8 +100,11 @@ def merchant_on_program(merchant: str, program: str,
     distinctive = _distinctive(merchant)
     if not distinctive:
         return False
+    q = f"{merchant} {prog.name}"
+    if country:
+        q += f" {country}"
     try:
-        results = discover.search(f"{merchant} {prog.name}")
+        results = discover.search(q)
     except Exception:
         return False
     for url in results[:8]:

@@ -60,9 +60,12 @@ def rank_urls(urls: list[str], card_name: str) -> list[str]:
     return sorted(urls, key=score, reverse=True)
 
 
-def find_doc_url(card_name: str) -> str:
+def find_doc_url(card_name: str, country: str = "") -> str:
     """Best official-looking URL for the card's rewards/terms doc."""
-    urls = search(f"{card_name} credit card rewards cashback terms")
+    q = f"{card_name} credit card rewards cashback terms"
+    if country:
+        q += f" {country}"
+    urls = search(q)
     if not urls:
         raise LookupError(f"no search results for: {card_name}")
     return rank_urls(urls, card_name)[0]
