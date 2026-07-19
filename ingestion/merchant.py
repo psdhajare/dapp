@@ -9,6 +9,7 @@ returned offers to the cards the user holds.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 
 from . import discover
@@ -59,22 +60,76 @@ class MerchantResult:
     source_ref: str | None = None
 
 
+# URL hints that a page is a bank/merchant offer page rather than an article.
+_OFFER_HINTS = (
+    "offer", "deal", "discount", "cashback", "lifestyle", "promo", "rewards",
+)
+_MAX_PAGES = 3
+_PER_PAGE_CHARS = 8000
+_COMBINED_CHARS = 20000
+
+
+def _rank_offer_urls(urls: list[str], merchant: str) -> list[str]:
+    """Prefer URLs that look like offer/deal pages and mention the merchant."""
+    words = [w for w in re.split(r"\W+", merchant.lower()) if len(w) > 2]
+
+    def score(u: str) -> int:
+        ul = u.lower()
+        return (sum(2 for h in _OFFER_HINTS if h in ul)
+                + sum(1 for w in words if w in ul))
+
+    return sorted(urls, key=score, reverse=True)
+
+
+def _gather_urls(merchant: str) -> list[str]:
+    """Merge results from a couple of offer-focused queries, de-duped."""
+    seen: list[str] = []
+    for q in (f'"{merchant}" credit card offer', f"{merchant} card discount deal"):
+        try:
+            for u in discover.search(q):
+                if u not in seen:
+                    seen.append(u)
+        except Exception:
+            continue
+    return seen
+
+
 def find_merchant_offers(
     merchant: str, client: LLMClient, url: str | None = None
 ) -> MerchantResult:
-    """Search the web for the merchant and extract card offers via the LLM."""
+    """Search the web for the merchant and extract card offers via the LLM.
+
+    Fetches the top few offer-ranked pages and extracts from their combined
+    text, so bank 'lifestyle/deals' portals are caught, not just the first hit.
+    """
     category = classify(merchant, client)
 
+    texts: list[str] = []
+    source_ref = url
     try:
-        url = url or discover.find_doc_url(f"{merchant} credit card offer")
-        text = discover.fetch_text(url)
+        if url:
+            t = discover.fetch_text(url)
+            if t.strip():
+                texts.append(t[:_PER_PAGE_CHARS])
+        else:
+            ranked = _rank_offer_urls(_gather_urls(merchant), merchant)[:_MAX_PAGES]
+            source_ref = ranked[0] if ranked else None
+            for u in ranked:
+                try:
+                    t = discover.fetch_text(u)
+                except Exception:
+                    continue
+                if t.strip():
+                    texts.append(t[:_PER_PAGE_CHARS])
     except Exception:  # network/search failure -> best card still works, no offers
         return MerchantResult(merchant=merchant, category=category, offers=[])
 
-    if not text.strip():
-        return MerchantResult(merchant=merchant, category=category, offers=[])
+    if not texts:
+        return MerchantResult(
+            merchant=merchant, category=category, offers=[], source_ref=source_ref)
 
-    raw = client.complete(_SYSTEM, _USER.format(merchant=merchant, text=text))
+    combined = "\n\n".join(texts)[:_COMBINED_CHARS]
+    raw = client.complete(_SYSTEM, _USER.format(merchant=merchant, text=combined))
     data = _parse(raw)
 
     cat = data.get("category")
@@ -94,7 +149,7 @@ def find_merchant_offers(
         ))
 
     return MerchantResult(
-        merchant=merchant, category=category, offers=offers, source_ref=url
+        merchant=merchant, category=category, offers=offers, source_ref=source_ref
     )
 
 

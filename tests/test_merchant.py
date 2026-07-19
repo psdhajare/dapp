@@ -17,7 +17,11 @@ OFFERS_JSON = json.dumps({
 
 
 def test_find_offers_happy_path(monkeypatch):
-    monkeypatch.setattr(discover, "find_doc_url", lambda q: "https://x.ae/salon")
+    # Offer/deal URL should outrank a generic article and be the source.
+    monkeypatch.setattr(discover, "search", lambda q: [
+        "https://wallethub.com/best-baby-cards",
+        "https://lifestyle.emiratesnbd.com/en/deals/glossy-salon-offer",
+    ])
     monkeypatch.setattr(discover, "fetch_text", lambda u: "Glossy Salon offers ...")
 
     r = find_merchant_offers("Glossy Hair Salon", FakeLLM(OFFERS_JSON))
@@ -25,22 +29,22 @@ def test_find_offers_happy_path(monkeypatch):
     assert len(r.offers) == 1               # blank-title offer dropped
     assert r.offers[0].card_hint == "Emirates NBD"
     assert r.offers[0].valid_until == "31 Dec 2026"
-    assert r.source_ref == "https://x.ae/salon"
+    assert "emiratesnbd.com" in r.source_ref  # deal page ranked first
 
 
 def test_category_from_keyword_even_if_search_fails(monkeypatch):
     def boom(_):
         raise LookupError("no results")
-    monkeypatch.setattr(discover, "find_doc_url", boom)
+    monkeypatch.setattr(discover, "search", boom)
 
-    # Salon keyword still yields a category; offers empty on network failure.
+    # Salon keyword still yields a category; offers empty on search failure.
     r = find_merchant_offers("Downtown Salon", FakeLLM("{}"))
     assert r.category == "beauty"
     assert r.offers == []
 
 
 def test_result_to_dict_shape(monkeypatch):
-    monkeypatch.setattr(discover, "find_doc_url", lambda q: "https://x.ae")
+    monkeypatch.setattr(discover, "search", lambda q: ["https://x.ae/offer"])
     monkeypatch.setattr(discover, "fetch_text", lambda u: "text")
     d = result_to_dict(find_merchant_offers("Some Cafe", FakeLLM(OFFERS_JSON)))
     assert set(d) == {"merchant", "category", "offers", "source_ref"}
