@@ -7,14 +7,14 @@ import 'package:sqflite_common/sqlite_api.dart';
 
 /// Bump whenever bundled schema/seed data changes: existing installs drop and
 /// rebuild their local copy on next launch.
-const _dbVersion = 13;
+const _dbVersion = 14;
 
-Future<Database> openAppDb(DatabaseFactory factory) async {
+Future<Database> openAppDb(DatabaseFactory factory, {bool seed = false}) async {
   return factory.openDatabase(
     'bestcard.db',
     options: OpenDatabaseOptions(
       version: _dbVersion,
-      onCreate: (db, _) async => _build(db),
+      onCreate: (db, _) async => _build(db, seed),
       onUpgrade: (db, _, __) async {
         await db.execute('PRAGMA foreign_keys = OFF');
         final tables = await db.rawQuery(
@@ -24,15 +24,17 @@ Future<Database> openAppDb(DatabaseFactory factory) async {
           await db.execute('DROP TABLE IF EXISTS ${t['name']}');
         }
         await db.execute('PRAGMA foreign_keys = ON');
-        await _build(db);
+        await _build(db, seed);
       },
     ),
   );
 }
 
-Future<void> _build(Database db) async {
+/// Builds schema; loads bundled demo cards only when [seed] is true. Default is
+/// a clean, empty wallet — real cards come from the ingestion flow.
+Future<void> _build(Database db, bool seed) async {
   await _runScript(db, 'assets/schema.sql');
-  await _runScript(db, 'assets/seed.sql');
+  if (seed) await _runScript(db, 'assets/seed.sql');
 }
 
 Future<void> _runScript(Database db, String asset) async {

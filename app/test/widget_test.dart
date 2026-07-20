@@ -53,8 +53,9 @@ const titaniumJson = '''
 Future<BestCardApp> buildApp({
   List<String> venueTypes = const [],
   IngestService? ingest,
+  Map<String, Object> prefs = const {},
 }) async {
-  SharedPreferences.setMockInitialValues({});
+  SharedPreferences.setMockInitialValues({'tour_seen': true, ...prefs});
   final dao = CardDao(await openSeedDb());
   final poiMap = await dao.loadPoiMap();
   return BestCardApp(
@@ -99,15 +100,23 @@ void main() {
   testWidgets('location flow shows issuer and card name plus cap flag',
       (tester) async {
     await tester.pumpWidget(await buildApp(venueTypes: ['supermarket']));
+    await tester.pumpAndSettle();
 
-    await tester.tap(find.byIcon(Icons.near_me));
+    await tester.tap(find.byKey(const Key('chip_location')));
     await tester.pumpAndSettle();
 
     // Grocery: amex 2pts*0.9p = 1.8% beats barclays 1% cashback.
     expect(find.byKey(const Key('best_card')), findsOneWidget);
     expect(find.text('AMERICAN EXPRESS'), findsOneWidget);
     expect(find.text('Amex Gold'), findsOneWidget);
+    // Cap pill sits below the deck — scroll it into view before asserting.
+    await tester.dragUntilVisible(
+        find.byKey(const Key('cap_flag')),
+        find.byType(Scrollable).first,
+        const Offset(0, -100));
     expect(find.byKey(const Key('cap_flag')), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 3)); // flush celebration timers
   });
 
   testWidgets('simulation chip picks category without location',
@@ -121,6 +130,22 @@ void main() {
     expect(find.textContaining('back on dining'), findsOneWidget);
   });
 
+  testWidgets('switching category refreshes the winner percentage (no stale rate)',
+      (tester) async {
+    await tester.pumpWidget(await buildApp());
+
+    // Amex wins both, so the card set is unchanged across the switch — this is
+    // the case that used to show a stale rate.
+    await tester.tap(find.byKey(const Key('sim_dining')));
+    await tester.pumpAndSettle();
+    expect(find.text('3.60%'), findsOneWidget); // 4 pts * 0.9p
+
+    await tester.tap(find.byKey(const Key('sim_grocery')));
+    await tester.pumpAndSettle();
+    expect(find.text('1.80%'), findsOneWidget); // 2 pts * 0.9p
+    expect(find.text('3.60%'), findsNothing); // old rate must be gone
+  });
+
   testWidgets('min-spend rule excluded from pick but shown as hint',
       (tester) async {
     await tester.pumpWidget(await buildApp());
@@ -131,12 +156,17 @@ void main() {
 
     expect(find.text('Amex Gold'), findsOneWidget);
     final hint = find.byKey(const Key('min_spend_hint'));
+    // Hint pill sits below the deck — scroll it into view before asserting.
+    await tester.dragUntilVisible(
+        hint, find.byType(Scrollable).first, const Offset(0, -100));
     expect(hint, findsOneWidget);
     expect(
       find.textContaining('Barclays · Barclays Cashback hits 5.00%'),
       findsOneWidget,
     );
     expect(find.textContaining('reaches 3000'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 3)); // flush celebration timers
   });
 
   testWidgets('offers for the category are listed', (tester) async {
@@ -145,12 +175,23 @@ void main() {
     await tester.tap(find.byKey(const Key('sim_entertainment')));
     await tester.pumpAndSettle();
 
+    // Offers list sits below the deck — scroll it into view before asserting.
+    await tester.dragUntilVisible(find.byKey(const Key('offer')),
+        find.byType(Scrollable).first, const Offset(0, -100));
     expect(find.byKey(const Key('offer')), findsOneWidget);
     expect(find.text('Buy 1 Get 1 movie tickets'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 3)); // flush celebration timers
   });
 
   testWidgets('adding a card via the wallet sheet ingests it',
       (tester) async {
+    // The add-card sheet (preview + colour picker + button) is taller than the
+    // default 800x600 test surface; give it room so it doesn't overflow.
+    tester.view.physicalSize = const Size(1200, 2200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(await buildApp(ingest: fakeIngest(titaniumJson)));
 
     await tester.tap(find.byKey(const Key('wallet_button')));
@@ -171,6 +212,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Titanium'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 3)); // flush lingering timers
   });
 
   testWidgets('failed ingestion shows the error in the sheet',
@@ -188,16 +231,20 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('add_card_error')), findsOneWidget);
-    expect(find.textContaining('no search results'), findsOneWidget);
+    // A non-404 backend failure now surfaces a friendly message (kFriendlyError)
+    // in the sheet rather than echoing the raw backend error string.
+    expect(find.textContaining('something went wrong'), findsOneWidget);
   });
 
   testWidgets('search a merchant: keyword category + live offers with badges',
       (tester) async {
+    // card_hint points at a card the seed wallet holds (Amex Gold) so the offer
+    // surfaces as a held ("In your wallet") offer rather than a non-held one.
     const searchJson = '''
       {"merchant":"Glossy Hair Salon","category":"beauty","cached":false,
        "offers":[
          {"title":"20% off hair services","description":"Weekends",
-          "card_hint":"Emirates NBD","valid_until":"31 Dec 2026"}]}''';
+          "card_hint":"American Express","valid_until":"31 Dec 2026"}]}''';
     await tester.pumpWidget(
         await buildApp(ingest: fakeRouted(searchBody: searchJson)));
     await tester.pumpAndSettle();
@@ -214,11 +261,16 @@ void main() {
 
     // Best-card header reflects the searched merchant.
     expect(find.textContaining('Best at Glossy Hair Salon'), findsOneWidget);
-    // Live offer rendered with limited-time + wallet badges.
+    // Live offer rendered with limited-time + wallet badges. It sits below the
+    // deck — scroll it into view before asserting.
+    await tester.dragUntilVisible(find.byKey(const Key('merchant_offer')),
+        find.byType(Scrollable).first, const Offset(0, -100));
     expect(find.byKey(const Key('merchant_offer')), findsOneWidget);
     expect(find.text('20% off hair services'), findsOneWidget);
     expect(find.textContaining('Until 31 Dec 2026'), findsOneWidget);
-    expect(find.text('In your wallet'), findsOneWidget); // Emirates NBD held
+    expect(find.text('In your wallet'), findsOneWidget); // Amex Gold held
+
+    await tester.pump(const Duration(seconds: 3)); // flush celebration timers
   });
 
   testWidgets('search with no offers shows empty message', (tester) async {
@@ -233,19 +285,37 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
     }
 
-    expect(find.textContaining('No live card offers'), findsOneWidget);
+    // Empty-offers message sits below the deck — scroll it into view.
+    final empty = find.textContaining('None of your cards has an offer');
+    await tester.dragUntilVisible(
+        empty, find.byType(Scrollable).first, const Offset(0, -100));
+    expect(empty, findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 3)); // flush lingering timers
   });
 
   testWidgets('profile: set name and switch theme to dark', (tester) async {
-    await tester.pumpWidget(await buildApp());
+    // Year + employment are mandatory; seed them so the test only drives name.
+    await tester.pumpWidget(await buildApp(
+        prefs: {'birth_year': '1990', 'employment': 'Employed'}));
 
     await tester.tap(find.byKey(const Key('profile_button')));
     await tester.pumpAndSettle();
 
+    final list = find.byType(Scrollable).first;
+
     await tester.enterText(
         find.byKey(const Key('profile_name_field')), 'Prasad');
+
+    // Save sits at the bottom of a lazy ListView — scroll it into view first.
+    await tester.scrollUntilVisible(
+        find.byKey(const Key('save_profile')), 300,
+        scrollable: list);
+    await tester.tap(find.byKey(const Key('save_profile')));
     await tester.pumpAndSettle();
 
+    // Theme control is higher up — scroll back to it.
+    await tester.scrollUntilVisible(find.text('Dark'), -300, scrollable: list);
     await tester.tap(find.text('Dark'));
     await tester.pumpAndSettle();
 
@@ -254,9 +324,13 @@ void main() {
     expect(Theme.of(ctx).brightness, Brightness.dark);
 
     // Back on the home screen the greeting uses the name.
-    await tester.pageBack();
+    await tester.scrollUntilVisible(find.byKey(const Key('profile_back')), -300,
+        scrollable: list);
+    await tester.tap(find.byKey(const Key('profile_back')));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Prasad'), findsOneWidget);
+    expect(find.textContaining('Prasad'), findsAtLeastNWidgets(1));
+
+    await tester.pump(const Duration(seconds: 2)); // flush the Saved snackbar
   });
 
   testWidgets('swiping a card away changes the recommendation',

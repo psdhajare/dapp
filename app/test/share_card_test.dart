@@ -35,7 +35,7 @@ void main() {
 
     expect(find.text('My best card for dining'), findsOneWidget);
     expect(
-        find.text('Best Card · always pay with your best card'), findsOneWidget);
+        find.text('ToroKard · always pay with your best card'), findsOneWidget);
     expect(find.byType(CardVisual), findsOneWidget);
   });
 }

@@ -18,6 +18,7 @@ import 'input_guard.dart';
 import 'merchant_category.dart';
 import 'profile_store.dart';
 import 'rate_limiter.dart';
+import 'screens/onboarding_screen.dart';
 import 'screens/profile_screen.dart';
 import 'share_service.dart';
 import 'theme/concierge_theme.dart';
@@ -54,8 +55,11 @@ Future<void> main() async {
 
   const tomtomKey = String.fromEnvironment('TOMTOM_API_KEY');
   const placesKey = String.fromEnvironment('PLACES_API_KEY');
+  // Off by default: app starts with an empty wallet. Enable demo cards with
+  // --dart-define=SEED_DATA=true.
+  const seedData = bool.fromEnvironment('SEED_DATA');
 
-  final db = await openAppDb(resolveDbFactory());
+  final db = await openAppDb(resolveDbFactory(), seed: seedData);
   final dao = CardDao(db);
   final poiMap = await dao.loadPoiMap();
   // Prefer TomTom (best Gulf POI coverage), then Google, else keyless OSM.
@@ -113,13 +117,15 @@ class BestCardApp extends StatelessWidget {
         theme: conciergeTheme(Brightness.light),
         darkTheme: conciergeTheme(Brightness.dark),
         themeMode: profile.themeMode,
-        home: RootScreen(
-            dao: dao,
-            venue: venue,
-            locationFn: locationFn,
-            ingest: ingest,
-            profile: profile,
-            analytics: analytics),
+        home: profile.tourSeen
+            ? RootScreen(
+                dao: dao,
+                venue: venue,
+                locationFn: locationFn,
+                ingest: ingest,
+                profile: profile,
+                analytics: analytics)
+            : OnboardingScreen(onDone: profile.setTourSeen),
       ),
     );
   }
@@ -149,12 +155,16 @@ class RootScreen extends StatefulWidget {
 
 class _RootScreenState extends State<RootScreen> {
   int _tab = 0;
-  final _recommendKey = GlobalKey<_RecommendTabState>();
   final _pager = PageController();
+  // Bumped whenever the wallet changes. RecommendTab listens and re-ranks —
+  // reliable regardless of tab-mount timing (a GlobalKey.currentState call
+  // races the RecommendTab's mount and silently no-ops).
+  final _walletRev = ValueNotifier<int>(0);
 
   @override
   void dispose() {
     _pager.dispose();
+    _walletRev.dispose();
     super.dispose();
   }
 
@@ -170,29 +180,23 @@ class _RootScreenState extends State<RootScreen> {
         bottom: false,
         child: PageView(
           controller: _pager,
-          onPageChanged: (i) {
-            setState(() => _tab = i);
-            if (i == 0) {
-              _recommendKey.currentState?.refreshAfterWalletChange();
-            }
-          },
+          onPageChanged: (i) => setState(() => _tab = i),
           children: [
             RecommendTab(
-              key: _recommendKey,
               dao: widget.dao,
               venue: widget.venue,
               locationFn: widget.locationFn,
               profile: widget.profile,
               analytics: widget.analytics,
               ingest: widget.ingest,
+              walletRevision: _walletRev,
             ),
             WalletTab(
               dao: widget.dao,
               ingest: widget.ingest,
               analytics: widget.analytics,
               profile: widget.profile,
-              onWalletChanged: () =>
-                  _recommendKey.currentState?.refreshAfterWalletChange(),
+              onWalletChanged: () => _walletRev.value++,
             ),
           ],
         ),
@@ -229,6 +233,7 @@ class _BlurNav extends StatelessWidget {
               Row(
                 children: [
                   _NavItem(
+                    buttonKey: const Key('recommend_button'),
                     icon: Icons.style_outlined,
                     selectedIcon: Icons.style,
                     label: 'Best card',
@@ -342,6 +347,7 @@ class RecommendTab extends StatefulWidget {
   final ProfileStore profile;
   final Analytics analytics;
   final IngestService? ingest;
+  final Listenable walletRevision; // fires when the wallet changes
 
   const RecommendTab({
     super.key,
@@ -350,6 +356,7 @@ class RecommendTab extends StatefulWidget {
     required this.locationFn,
     required this.profile,
     required this.analytics,
+    required this.walletRevision,
     this.ingest,
   });
 
@@ -358,7 +365,10 @@ class RecommendTab extends StatefulWidget {
 }
 
 class _RecommendTabState extends State<RecommendTab>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   String? _selected; // simulation label or 'location'; null = everyday spend
   String? _status;
   _Result? _result;
@@ -395,15 +405,21 @@ class _RecommendTabState extends State<RecommendTab>
       setState(() {});
     });
     WidgetsBinding.instance.addObserver(this);
+    widget.walletRevision.addListener(_onWalletChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       // Honor a Siri request ("best card for groceries"), else default view.
       if (!await _handleSiriRequest()) await _recommend('general');
     });
   }
 
+  void _onWalletChanged() {
+    if (mounted) refreshAfterWalletChange();
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.walletRevision.removeListener(_onWalletChanged);
     _searchCtl.dispose();
     _searchFocus.dispose();
     super.dispose();
@@ -423,8 +439,34 @@ class _RecommendTabState extends State<RecommendTab>
     return true;
   }
 
+  // Wallet snapshot cached across category switches (the wallet doesn't change
+  // between taps) so ranking is instant; invalidated on any wallet change.
+  List<CardRules>? _heldCache;
+  List<CardInfo>? _allCache;
+
+  Future<List<CardRules>> _heldCards() async =>
+      _heldCache ??= await widget.dao.loadUserCards();
+  Future<List<CardInfo>> _allCards() async =>
+      _allCache ??= await widget.dao.allCards();
+
   Future<void> refreshAfterWalletChange() async {
+    _heldCache = null;
+    _allCache = null;
     await _recommend(_result?.category ?? 'general');
+  }
+
+  /// Add a card straight from the Best card screen (empty-wallet shortcut).
+  Future<void> _openAddCard() async {
+    final added = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _AddCardSheet(
+          dao: widget.dao,
+          ingest: widget.ingest,
+          analytics: widget.analytics,
+          country: widget.profile.country),
+    );
+    if (added == true) await refreshAfterWalletChange();
   }
 
   /// Profile → "Remove all cards": empties the wallet, then re-ranks.
@@ -816,7 +858,7 @@ class _RecommendTabState extends State<RecommendTab>
   }
 
   Future<void> _recommend(String category) async {
-    final cards = await widget.dao.loadUserCards();
+    final cards = await _heldCards();
     final recs = rankCards(category, cards);
     if (recs.isEmpty) {
       setState(() {
@@ -825,20 +867,17 @@ class _RecommendTabState extends State<RecommendTab>
       });
       return;
     }
-    final all = await widget.dao.allCards();
+    final all = await _allCards();
     final ranked = [
       for (final rec in recs.take(3))
         _Ranked(all.firstWhere((c) => c.id == rec.cardId), rec),
     ];
-    final hints = <(String, MinSpendHint)>[];
-    for (final h in recs.first.hints) {
-      hints.add((await widget.dao.cardLabel(h.cardId), h));
-    }
-    final offers = await widget.dao.offersForCategory(category);
+    // Phase 1: show the pick immediately — cards are cached, so this is instant
+    // on every category switch. Offers/hints (a DB round-trip) fill in next.
     setState(() {
       _status = null;
       _revealed.clear(); // new result -> entrances play once, then stay put
-      _result = _Result(category, ranked, hints, offers);
+      _result = _Result(category, ranked, const [], const []);
     });
     widget.analytics.log(Analytics.recommendationShown, label: category);
     // Keep the home-screen widget in sync with the current best card.
@@ -849,6 +888,16 @@ class _RecommendTabState extends State<RecommendTab>
       headline: '${(winner.rec.effectiveRate * 100).toStringAsFixed(2)}%',
       caption: 'back on ${prettyCategory(category)}',
     );
+    // Phase 2: min-spend hints + category offers.
+    final hints = <(String, MinSpendHint)>[];
+    for (final h in recs.first.hints) {
+      hints.add((await widget.dao.cardLabel(h.cardId), h));
+    }
+    final offers = await widget.dao.offersForCategory(category);
+    // Guard against a newer category switch having landed meanwhile.
+    if (mounted && _result?.category == category) {
+      setState(() => _result = _Result(category, ranked, hints, offers));
+    }
   }
 
   /// Share the current best-card pick as a branded image.
@@ -890,6 +939,7 @@ class _RecommendTabState extends State<RecommendTab>
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin
     final t = Theme.of(context);
     final scheme = t.colorScheme;
     final r = _result;
@@ -1003,7 +1053,9 @@ class _RecommendTabState extends State<RecommendTab>
               )
             else if (r == null)
               _EmptyCategory(
-                  category: _labelFor(_selected, 'general'), status: _status)
+                  category: _labelFor(_selected, 'general'),
+                  status: _status,
+                  onAdd: _openAddCard)
             else ...[
               _Reveal(
                 order: 0,
@@ -1421,7 +1473,10 @@ class _CardInfoSheet extends StatelessWidget {
                       _RuleRow(rate: _rateLabel(r), rule: r),
                   const SizedBox(height: 16),
                   Text(
-                    'APR and full terms are in your card agreement.',
+                    'Good to know: APR is the yearly interest you pay if you '
+                    "don't clear the balance in time. You have every right to "
+                    'know what a late payment could cost. Full terms live in '
+                    'your card agreement.',
                     style: t.textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant.withValues(alpha: 0.8)),
                   ),
@@ -1782,6 +1837,12 @@ class _RankedDeckState extends State<_RankedDeck>
     if (incoming.length != current.length ||
         !incoming.containsAll(current)) {
       _order = List.of(widget.ranked);
+    } else if (!identical(widget.ranked, old.ranked)) {
+      // Same cards but the ranking data changed (e.g. switching category keeps
+      // a single card): refresh each card's rate/offer while preserving the
+      // user's promotion order, so the shown % always matches the category.
+      final byId = {for (final r in widget.ranked) r.card.id: r};
+      _order = [for (final r in _order) byId[r.card.id] ?? r];
     }
     if (widget.celebrateToken != old.celebrateToken &&
         widget.celebrateToken > 0) {
@@ -2331,7 +2392,8 @@ class _Badge extends StatelessWidget {
 class _EmptyCategory extends StatelessWidget {
   final String category;
   final String? status;
-  const _EmptyCategory({required this.category, this.status});
+  final VoidCallback? onAdd;
+  const _EmptyCategory({required this.category, this.status, this.onAdd});
 
   @override
   Widget build(BuildContext context) {
@@ -2346,10 +2408,21 @@ class _EmptyCategory extends StatelessWidget {
               textAlign: TextAlign.center,
               style: t.textTheme.titleMedium
                   ?.copyWith(color: t.colorScheme.onSurfaceVariant)),
-          const SizedBox(height: 4),
-          Text('Add one in the Wallet tab →',
-              style: t.textTheme.labelLarge
-                  ?.copyWith(color: t.colorScheme.primary)),
+          if (onAdd != null) ...[
+            const SizedBox(height: 20),
+            FilledButton(
+              key: const Key('recommend_add_card'),
+              onPressed: onAdd,
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.add, size: 20),
+                  SizedBox(width: 8),
+                  Text('Add a card'),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -2573,45 +2646,48 @@ class _WalletTabState extends State<WalletTab> {
                         ),
                     ],
                   ),
-        // "Add a card" pinned over a background fade.
-        Positioned(
-          left: 0,
-          right: 0,
-          bottom: 0,
-          child: IgnorePointer(
-            ignoring: true,
-            child: Container(
-              height: 190,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    t.scaffoldBackgroundColor.withValues(alpha: 0),
-                    t.scaffoldBackgroundColor,
-                  ],
+        // "Add a card" pinned over a background fade — only with cards present;
+        // an empty wallet shows the single _EmptyWallet call to action instead.
+        if (held != null && held.isNotEmpty) ...[
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              ignoring: true,
+              child: Container(
+                height: 190,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      t.scaffoldBackgroundColor.withValues(alpha: 0),
+                      t.scaffoldBackgroundColor,
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-        Positioned(
-          left: 20,
-          right: 20,
-          bottom: 16,
-          child: FilledButton(
-            key: const Key('add_card_button'),
-            onPressed: _openAddSheet,
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.add, size: 20),
-                SizedBox(width: 8),
-                Text('Add a card'),
-              ],
+          Positioned(
+            left: 20,
+            right: 20,
+            bottom: 16,
+            child: FilledButton(
+              key: const Key('add_card_button'),
+              onPressed: _openAddSheet,
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.add, size: 20),
+                  SizedBox(width: 8),
+                  Text('Add a card'),
+                ],
+              ),
             ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -2632,10 +2708,11 @@ class _EmptyWallet extends StatelessWidget {
           children: [
             SizedBox(width: 220, child: _GhostCard()),
             const SizedBox(height: 22),
-            Text('Your wallet is empty.',
+            Text('Your wallet is empty',
                 style: t.textTheme.titleMedium),
             const SizedBox(height: 6),
-            Text('Add your first card to start getting picks.',
+            Text("Let's add your first card and embark on the journey to "
+                'smarter spending.',
                 textAlign: TextAlign.center,
                 style: t.textTheme.bodyMedium
                     ?.copyWith(color: t.colorScheme.onSurfaceVariant)),
@@ -2643,7 +2720,14 @@ class _EmptyWallet extends StatelessWidget {
             FilledButton(
               key: const Key('add_card_button'),
               onPressed: onAdd,
-              child: const Text('Add a card'),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.add, size: 20),
+                  SizedBox(width: 8),
+                  Text('Add a card'),
+                ],
+              ),
             ),
           ],
         ),

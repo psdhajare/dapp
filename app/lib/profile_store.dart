@@ -10,6 +10,9 @@ class ProfileStore extends ChangeNotifier {
   static const _kCountry = 'country';
   static const _kCountryUserSet = 'country_user_set';
   static const _kCurrency = 'currency';
+  static const _kBirthYear = 'birth_year';
+  static const _kEmployment = 'employment';
+  static const _kTourSeen = 'tour_seen';
   static const _maxHistory = 10;
 
   final SharedPreferences _prefs;
@@ -20,6 +23,9 @@ class ProfileStore extends ChangeNotifier {
   String _country;
   bool _countryUserSet;
   String _currency;
+  String _birthYear;
+  String _employment;
+  bool _tourSeen;
 
   ProfileStore(this._prefs)
       : _name = _prefs.getString(_kName) ?? '',
@@ -28,7 +34,10 @@ class ProfileStore extends ChangeNotifier {
         _history = _prefs.getStringList(_kHist) ?? [],
         _country = _prefs.getString(_kCountry) ?? '', // none until known
         _countryUserSet = _prefs.getBool(_kCountryUserSet) ?? false,
-        _currency = _prefs.getString(_kCurrency) ?? 'AED';
+        _currency = _prefs.getString(_kCurrency) ?? 'AED',
+        _birthYear = _prefs.getString(_kBirthYear) ?? '',
+        _employment = _prefs.getString(_kEmployment) ?? '',
+        _tourSeen = _prefs.getBool(_kTourSeen) ?? false;
 
   static Future<ProfileStore> load() async =>
       ProfileStore(await SharedPreferences.getInstance());
@@ -40,6 +49,33 @@ class ProfileStore extends ChangeNotifier {
   String get country => _country;
   bool get countryUserSet => _countryUserSet;
   String get currency => _currency;
+  String get birthYear => _birthYear;
+  String get employment => _employment;
+  bool get tourSeen => _tourSeen;
+
+  /// Mark the first-run welcome tour as completed (or skipped).
+  Future<void> setTourSeen() async {
+    if (_tourSeen) return;
+    _tourSeen = true;
+    await _prefs.setBool(_kTourSeen, true);
+    notifyListeners();
+  }
+
+  /// Save personal details together (name + birth year + employment status),
+  /// stored locally only. Deliberately non-PII (year, not full DOB).
+  Future<void> saveDetails({
+    required String name,
+    required String birthYear,
+    required String employment,
+  }) async {
+    _name = name.trim();
+    _birthYear = birthYear.trim();
+    _employment = employment.trim();
+    await _prefs.setString(_kName, _name);
+    await _prefs.setString(_kBirthYear, _birthYear);
+    await _prefs.setString(_kEmployment, _employment);
+    notifyListeners();
+  }
 
   /// User explicitly picked a country (won't be overridden by auto-detect).
   Future<void> setCountry(String value) async {

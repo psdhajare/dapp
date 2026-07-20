@@ -10,7 +10,10 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 /// drop leftover tables from previous tests before rebuilding.
 Future<Database> openSeedDb() async {
   sqfliteFfiInit();
-  final db = await databaseFactoryFfi.openDatabase(inMemoryDatabasePath);
+  // No-isolate factory: the isolate-backed one leaves a background worker alive
+  // that keeps `testWidgets` from terminating (hangs at teardown).
+  final db =
+      await databaseFactoryFfiNoIsolate.openDatabase(inMemoryDatabasePath);
   await db.execute('PRAGMA foreign_keys = OFF');
   final tables = await db.rawQuery(
     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",

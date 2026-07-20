@@ -20,6 +20,14 @@ const kCurrencies = <String>[
   'AED', 'SAR', 'QAR', 'KWD', 'BHD', 'OMR', 'INR', 'PKR', 'GBP', 'USD', 'SGD',
 ];
 
+const kEmploymentOptions = <String>[
+  'Employed', 'Self-employed', 'Unemployed', 'Student', 'Retired',
+];
+
+const kIssueCategories = <String>[
+  'Wallet', 'Card data', 'Offers', 'App issue', 'Suggestion', 'Other',
+];
+
 class ProfileScreen extends StatefulWidget {
   final ProfileStore profile;
   final Analytics analytics;
@@ -41,25 +49,60 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  late final TextEditingController _name =
-      TextEditingController(text: widget.profile.name);
-  final _nameFocus = FocusNode();
+  late final _name = TextEditingController(text: widget.profile.name);
+  late String _birthYear = widget.profile.birthYear;
+  late String _employment = widget.profile.employment;
   bool _refreshing = false;
 
-  @override
-  void initState() {
-    super.initState();
-    // Auto-save on blur (in addition to onChanged).
-    _nameFocus.addListener(() {
-      if (!_nameFocus.hasFocus) widget.profile.setName(_name.text);
-    });
-  }
+  // 18–90 year-olds; newest first.
+  static final List<String> _birthYears = [
+    for (var y = DateTime.now().year - 18; y >= DateTime.now().year - 90; y--)
+      '$y'
+  ];
 
   @override
   void dispose() {
     _name.dispose();
-    _nameFocus.dispose();
     super.dispose();
+  }
+
+  Future<void> _saveDetails() async {
+    FocusScope.of(context).unfocus();
+    if (_name.text.trim().isEmpty ||
+        _birthYear.isEmpty ||
+        _employment.isEmpty) {
+      _snack('Please fill name, year of birth and employment.');
+      return;
+    }
+    await widget.profile.saveDetails(
+      name: _name.text,
+      birthYear: _birthYear,
+      employment: _employment,
+    );
+    if (!mounted) return;
+    _snack('Saved');
+  }
+
+  Future<void> _openWriteToUs() async {
+    final sent = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => const _WriteToUsSheet(),
+    );
+    if (sent == true && mounted) {
+      _snack("Query submitted. We'll get in touch with you soon.",
+          duration: const Duration(seconds: 5));
+    }
+  }
+
+  void _snack(String msg, {Duration duration = const Duration(seconds: 2)}) {
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text(msg),
+        duration: duration,
+        behavior: SnackBarBehavior.floating,
+      ));
   }
 
   Future<void> _refresh() async {
@@ -97,33 +140,58 @@ class _ProfileScreenState extends State<ProfileScreen> {
           // Header row: 36px tonal back chip + serif title inline, gap 12.
           Row(
             children: [
-              _BackChip(onTap: () => Navigator.of(context).maybePop()),
+              _BackChip(
+                  key: const Key('profile_back'),
+                  onTap: () => Navigator.of(context).maybePop()),
               const SizedBox(width: 12),
               Text('Profile', style: t.textTheme.displaySmall),
             ],
           ),
 
-          // YOUR NAME
-          const _Eyebrow('YOUR NAME'),
-          TextField(
-            key: const Key('profile_name_field'),
-            controller: _name,
-            focusNode: _nameFocus,
-            textInputAction: TextInputAction.done,
-            style: t.textTheme.bodyMedium,
-            decoration: const InputDecoration(hintText: 'e.g. Prasad'),
-            onChanged: widget.profile.setName,
-            onSubmitted: widget.profile.setName,
-          ),
-
-          // APPEARANCE
-          const _Eyebrow('APPEARANCE'),
-          AnimatedBuilder(
-            animation: widget.profile,
-            builder: (context, _) => _SegmentedTheme(
-              value: widget.profile.themeMode,
-              onChanged: widget.profile.setThemeMode,
-            ),
+          // PERSONAL DETAILS — stored locally only, deliberately non-PII.
+          const _Eyebrow('PERSONAL DETAILS'),
+          _SurfaceCard(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _LabeledField(
+                      label: 'Name',
+                      child: TextField(
+                        key: const Key('profile_name_field'),
+                        controller: _name,
+                        textCapitalization: TextCapitalization.words,
+                        style: t.textTheme.bodyMedium,
+                        decoration:
+                            const InputDecoration(hintText: 'e.g. Prasad'),
+                      ),
+                    ),
+                    _LabeledField(
+                      label: 'Year of birth',
+                      child: _FieldDropdown(
+                        key: const Key('profile_birthyear_field'),
+                        hint: 'Select year',
+                        value: _birthYear.isEmpty ? null : _birthYear,
+                        options: _birthYears,
+                        onChanged: (v) => setState(() => _birthYear = v),
+                      ),
+                    ),
+                    _LabeledField(
+                      label: 'Employment',
+                      child: _FieldDropdown(
+                        key: const Key('profile_employment_field'),
+                        hint: 'Select status',
+                        value: _employment.isEmpty ? null : _employment,
+                        options: kEmploymentOptions,
+                        onChanged: (v) => setState(() => _employment = v),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
 
           // REGION — sharpens offer/rate searches to your market.
@@ -161,6 +229,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
             },
           ),
 
+          // APPEARANCE
+          const _Eyebrow('APPEARANCE'),
+          AnimatedBuilder(
+            animation: widget.profile,
+            builder: (context, _) => _SegmentedTheme(
+              value: widget.profile.themeMode,
+              onChanged: widget.profile.setThemeMode,
+            ),
+          ),
+
           // SEARCH
           const _Eyebrow('SEARCH'),
           _SurfaceCard(
@@ -168,11 +246,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
               AnimatedBuilder(
                 animation: widget.profile,
                 builder: (context, _) => _SwitchRow(
-                  title: 'Save recent searches',
+                  title: 'Opt out of search history',
                   description:
-                      'Show your last 10 searches under the search bar.',
-                  value: widget.profile.searchHistoryEnabled,
-                  onChanged: widget.profile.setSearchHistoryEnabled,
+                      'Recent searches appear under the search bar for quick '
+                      'access, stored on this device only.',
+                  value: !widget.profile.searchHistoryEnabled,
+                  onChanged: (v) => widget.profile.setSearchHistoryEnabled(!v),
                 ),
               ),
               const _InsetDivider(),
@@ -180,25 +259,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 title: 'Clear search history',
                 titleColor: scheme.primary,
                 onTap: widget.profile.clearSearchHistory,
-              ),
-            ],
-          ),
-
-          // PRIVACY
-          const _Eyebrow('PRIVACY'),
-          _SurfaceCard(
-            children: [
-              AnimatedBuilder(
-                animation: widget.analytics,
-                builder: (context, _) => _SwitchRow(
-                  switchKey: const Key('analytics_toggle'),
-                  title: 'Share anonymous usage',
-                  description:
-                      'Anonymous counts only — no names, cards, or amounts. '
-                      'Helps improve the app.',
-                  value: widget.analytics.enabled,
-                  onChanged: widget.analytics.setEnabled,
-                ),
               ),
             ],
           ),
@@ -228,6 +288,48 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ],
           ),
 
+          // PRIVACY — opt-out framing; spell out exactly what's collected.
+          const _Eyebrow('PRIVACY'),
+          _SurfaceCard(
+            children: [
+              AnimatedBuilder(
+                animation: widget.analytics,
+                builder: (context, _) => _SwitchRow(
+                  switchKey: const Key('analytics_toggle'),
+                  title: 'Opt out of usage insights',
+                  description:
+                      'We use app usage insights to improve your experience. '
+                      'Strictly no personal information is collected.',
+                  value: !widget.analytics.enabled,
+                  onChanged: (v) => widget.analytics.setEnabled(!v),
+                ),
+              ),
+            ],
+          ),
+
+          // SUPPORT
+          const _Eyebrow('SUPPORT'),
+          _SurfaceCard(
+            children: [
+              _ActionRow(
+                title: 'Write to us',
+                subtitle: 'Report an issue or send a suggestion',
+                onTap: _openWriteToUs,
+              ),
+            ],
+          ),
+
+          // Save (applies to Personal details).
+          const SizedBox(height: 24),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              key: const Key('save_profile'),
+              onPressed: _saveDetails,
+              child: const Text('Save'),
+            ),
+          ),
+
           // Footer
           const SizedBox(height: 28),
           Center(
@@ -254,7 +356,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
 class _BackChip extends StatelessWidget {
   final VoidCallback onTap;
-  const _BackChip({required this.onTap});
+  const _BackChip({super.key, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -293,6 +395,65 @@ class _Eyebrow extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(0, 22, 0, 8),
       child: Text(text, style: Theme.of(context).textTheme.labelSmall),
+    );
+  }
+}
+
+/// A small caption label above a form field.
+class _LabeledField extends StatelessWidget {
+  final String label;
+  final Widget child;
+  const _LabeledField({required this.label, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4, left: 2),
+            child: Text(label,
+                style: t.textTheme.bodySmall
+                    ?.copyWith(color: t.colorScheme.onSurfaceVariant)),
+          ),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+/// Dropdown styled like the text fields (uses the input decoration theme).
+class _FieldDropdown extends StatelessWidget {
+  final String hint;
+  final String? value;
+  final List<String> options;
+  final ValueChanged<String> onChanged;
+  const _FieldDropdown({
+    super.key,
+    required this.hint,
+    required this.value,
+    required this.options,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    return DropdownButtonFormField<String>(
+      initialValue: options.contains(value) ? value : null,
+      isExpanded: true,
+      hint: Text(hint, style: t.textTheme.bodyMedium),
+      style: t.textTheme.bodyMedium,
+      items: [
+        for (final o in options) DropdownMenuItem(value: o, child: Text(o)),
+      ],
+      onChanged: (v) {
+        if (v != null) onChanged(v);
+      },
     );
   }
 }
@@ -661,4 +822,138 @@ class _RemoveAllSheet extends StatelessWidget {
       ),
     );
   }
+}
+
+/// "Write to us" form: category + message (<=512) + email. Submit is a
+/// placeholder for now — nothing is sent; we just confirm receipt.
+class _WriteToUsSheet extends StatefulWidget {
+  const _WriteToUsSheet();
+
+  @override
+  State<_WriteToUsSheet> createState() => _WriteToUsSheetState();
+}
+
+class _WriteToUsSheetState extends State<_WriteToUsSheet> {
+  String? _category;
+  final _message = TextEditingController();
+  final _email = TextEditingController();
+  String? _error;
+  bool _sending = false;
+
+  @override
+  void dispose() {
+    _message.dispose();
+    _email.dispose();
+    super.dispose();
+  }
+
+  bool get _validEmail {
+    final e = _email.text.trim();
+    return RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(e);
+  }
+
+  Future<void> _submit() async {
+    if (_category == null ||
+        _message.text.trim().isEmpty ||
+        !_validEmail) {
+      setState(() => _error = 'Pick a category, write a message, and add a '
+          'valid email.');
+      return;
+    }
+    setState(() => _sending = true);
+    // TODO: wire to the backend / email. Placeholder for now.
+    await _submitFeedback(
+        category: _category!,
+        message: _message.text.trim(),
+        email: _email.text.trim());
+    if (mounted) Navigator.of(context).pop(true);
+  }
+
+  Future<void> _submitFeedback({
+    required String category,
+    required String message,
+    required String email,
+  }) async {
+    // Intentionally does nothing yet — a real endpoint slots in here later.
+    return;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final scheme = t.colorScheme;
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+            20, 14, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                    color: scheme.outline,
+                    borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text('Write to us', style: GoogleFontsSafeTitle.of(t)),
+            const SizedBox(height: 14),
+            _LabeledField(
+              label: 'Category',
+              child: _FieldDropdown(
+                hint: 'Select a category',
+                value: _category,
+                options: kIssueCategories,
+                onChanged: (v) => setState(() => _category = v),
+              ),
+            ),
+            _LabeledField(
+              label: 'Message',
+              child: TextField(
+                controller: _message,
+                maxLength: 512,
+                maxLines: 4,
+                textCapitalization: TextCapitalization.sentences,
+                style: t.textTheme.bodyMedium,
+                decoration:
+                    const InputDecoration(hintText: 'How can we help?'),
+              ),
+            ),
+            _LabeledField(
+              label: 'Email',
+              child: TextField(
+                controller: _email,
+                keyboardType: TextInputType.emailAddress,
+                style: t.textTheme.bodyMedium,
+                decoration: const InputDecoration(hintText: 'you@example.com'),
+              ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 4),
+              Text(_error!,
+                  style: t.textTheme.bodySmall?.copyWith(color: scheme.error)),
+            ],
+            const SizedBox(height: 14),
+            FilledButton(
+              key: const Key('submit_feedback'),
+              onPressed: _sending ? null : _submit,
+              child: const Text('Submit'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Serif title style helper for sheets.
+class GoogleFontsSafeTitle {
+  static TextStyle of(ThemeData t) =>
+      (t.textTheme.displaySmall ?? const TextStyle())
+          .copyWith(fontSize: 20, fontWeight: FontWeight.w500);
 }
