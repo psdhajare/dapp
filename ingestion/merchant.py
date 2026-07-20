@@ -117,17 +117,40 @@ def _rank_offer_urls(urls: list[str], merchant: str) -> list[str]:
     return sorted(urls, key=score, reverse=True)
 
 
-def _gather_urls(merchant: str, country: str = "") -> list[str]:
+# Product/scheme words dropped when reducing a card name to its bank, e.g.
+# "Emirates NBD Platinum" -> "Emirates NBD", "Mashreq Cashback Credit Card" ->
+# "Mashreq". The bank is what a merchant-offer page names ("... on Emirates NBD").
+_CARD_GENERIC = {
+    "credit", "card", "cards", "cashback", "cash", "back", "rewards", "reward",
+    "platinum", "gold", "titanium", "signature", "world", "infinite", "classic",
+    "standard", "plus", "black", "premium", "visa", "mastercard", "amex",
+}
+
+
+def _bank_phrase(card: str) -> str:
+    """The bank/issuer part of a card name (first up-to-2 non-generic words)."""
+    toks = [w for w in re.split(r"\W+", card.strip())
+            if w and w.lower() not in _CARD_GENERIC]
+    return " ".join(toks[:2])
+
+
+def _gather_urls(merchant: str, country: str = "",
+                 cards: list[str] | None = None) -> list[str]:
     """Merge results from several offer-focused queries, de-duped. More angles
-    raise recall so we don't miss the one page that lists the offer."""
+    raise recall so we don't miss the one page that lists the offer. The held
+    cards' banks add targeted queries (e.g. '"Khau Galli" Emirates NBD offer'),
+    which surface a bank's own offer listing that a generic query misses."""
     seen: list[str] = []
     c = f" {country}" if country else ""
-    queries = (
+    queries = [
         f'"{merchant}" credit card offer{c}',
         f"{merchant} card discount deal{c}",
         f"{merchant} bank offer promotion{c}",
         f"{merchant} cashback credit card{c}",
-    )
+    ]
+    # One query per distinct bank the user actually holds.
+    for bank in {_bank_phrase(c2) for c2 in (cards or []) if _bank_phrase(c2)}:
+        queries.append(f'"{merchant}" {bank} offer{c}')
     for q in queries:
         try:
             for u in discover.search(q, country=country):
@@ -201,7 +224,7 @@ def find_merchant_offers(
             urls = [url]
         else:
             urls = _rank_offer_urls(
-                _gather_urls(merchant, country), merchant)[:_MAX_CANDIDATES]
+                _gather_urls(merchant, country, cards), merchant)[:_MAX_CANDIDATES]
 
         def _fetch(u: str) -> str:
             try:

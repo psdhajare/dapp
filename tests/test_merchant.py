@@ -65,3 +65,22 @@ def test_result_to_dict_shape(monkeypatch):
     d = result_to_dict(find_merchant_offers("Some Cafe", FakeLLM(OFFERS_JSON)))
     assert set(d) == {"merchant", "category", "offers", "source_ref"}
     assert d["offers"][0]["title"] == "20% off"
+
+
+def test_bank_phrase_reduces_card_to_issuer():
+    assert merchant._bank_phrase("Emirates NBD Platinum") == "Emirates NBD"
+    assert merchant._bank_phrase("Mashreq Cashback Credit Card") == "Mashreq"
+    assert merchant._bank_phrase("Wio Credit Card") == "Wio"
+    assert merchant._bank_phrase("Apple Card") == "Apple"
+    assert merchant._bank_phrase("Diners Club") == "Diners Club"
+
+
+def test_gather_urls_adds_bank_targeted_queries(monkeypatch):
+    queries: list[str] = []
+    monkeypatch.setattr(merchant.discover, "search",
+                        lambda q, country="": (queries.append(q) or []))
+    merchant._gather_urls("Khau Galli", country="AE",
+                          cards=["Emirates NBD Platinum", "Wio Credit Card"])
+    # A per-bank query is issued for each held card's issuer.
+    assert any('"Khau Galli" Emirates NBD offer' in q for q in queries)
+    assert any('"Khau Galli" Wio offer' in q for q in queries)
