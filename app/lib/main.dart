@@ -1827,22 +1827,21 @@ class _RankedDeckState extends State<_RankedDeck>
     super.dispose();
   }
 
+  // Order-sensitive fingerprint of a ranking: card id + rate + what won.
+  static String _sig(List<_Ranked> l) => l
+      .map((r) => '${r.card.id}:${r.rec.effectiveRate}:${r.rec.categoryUsed}')
+      .join('|');
+
   @override
   void didUpdateWidget(_RankedDeck old) {
     super.didUpdateWidget(old);
-    // Reset the user's promotion only when the underlying set of cards changes
-    // (a new search/category), not on incidental parent rebuilds.
-    final incoming = widget.ranked.map((r) => r.card.id).toSet();
-    final current = _order.map((r) => r.card.id).toSet();
-    if (incoming.length != current.length ||
-        !incoming.containsAll(current)) {
+    // Adopt the incoming ranking order whenever the ranking actually changed —
+    // a new search, category, or rate — so the best card (e.g. an offer winner)
+    // jumps to the top instantly. Identical content across an incidental parent
+    // rebuild keeps the user's manual promotion order. (widget.ranked is a fresh
+    // list each build, so compare by content, not identity.)
+    if (_sig(widget.ranked) != _sig(old.ranked)) {
       _order = List.of(widget.ranked);
-    } else if (!identical(widget.ranked, old.ranked)) {
-      // Same cards but the ranking data changed (e.g. switching category keeps
-      // a single card): refresh each card's rate/offer while preserving the
-      // user's promotion order, so the shown % always matches the category.
-      final byId = {for (final r in widget.ranked) r.card.id: r};
-      _order = [for (final r in _order) byId[r.card.id] ?? r];
     }
     if (widget.celebrateToken != old.celebrateToken &&
         widget.celebrateToken > 0) {

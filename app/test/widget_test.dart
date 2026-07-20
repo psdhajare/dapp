@@ -5,6 +5,7 @@ import 'package:bestcard/main.dart';
 import 'package:bestcard/profile_store.dart';
 import 'package:bestcard/rate_limiter.dart';
 import 'package:bestcard/venue.dart';
+import 'package:bestcard/widgets/card_visual.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -269,6 +270,34 @@ void main() {
     expect(find.text('20% off hair services'), findsOneWidget);
     expect(find.textContaining('Until 31 Dec 2026'), findsOneWidget);
     expect(find.text('In your wallet'), findsOneWidget); // Amex Gold held
+
+    await tester.pump(const Duration(seconds: 3)); // flush celebration timers
+  });
+
+  testWidgets('search offer promotes the offer card to the top of the deck',
+      (tester) async {
+    // Beauty base winner is Amex (1pt = 0.9%). A 30% offer on Barclays must
+    // shuffle Barclays to the top of the deck the moment the search lands.
+    const searchJson = '''
+      {"merchant":"Glossy Hair Salon","category":"beauty","cached":false,
+       "offers":[
+         {"title":"30% off","card_hint":"Barclays Cashback","value_pct":30,
+          "valid_until":"31 Dec 2026"}]}''';
+    await tester.pumpWidget(
+        await buildApp(ingest: fakeRouted(searchBody: searchJson)));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+        find.byKey(const Key('merchant_search')), 'Glossy Hair Salon');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    for (var i = 0; i < 25; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    // The deck winner is the single CardVisual; runner-ups are _BackCard strips.
+    final winner = find.byType(CardVisual).first;
+    expect(find.descendant(of: winner, matching: find.text('Barclays Cashback')),
+        findsOneWidget); // Barclays, not the base winner Amex, is on top
 
     await tester.pump(const Duration(seconds: 3)); // flush celebration timers
   });
