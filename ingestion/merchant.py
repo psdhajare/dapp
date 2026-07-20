@@ -13,7 +13,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
-from . import discover, programs
+from . import discover, programs, render
 from .classify import classify
 from .llm import LLMClient
 from .models import VALID_CATEGORIES
@@ -228,9 +228,14 @@ def find_merchant_offers(
 
         def _fetch(u: str) -> str:
             try:
-                return discover.fetch_text(u, timeout=_FETCH_TIMEOUT)
+                t = discover.fetch_text(u, timeout=_FETCH_TIMEOUT)
             except Exception:
-                return ""
+                t = ""
+            # Empty -> the page is a JS SPA (e.g. a bank lifestyle/deals portal).
+            # Fall back to a browser-rendered fetch so its offers are readable.
+            if not t.strip():
+                t = render.render_text(u)
+            return t
 
         # Fetch candidates in parallel, then keep only pages that (a) yield text
         # (skips JS-only SPAs) AND (b) actually NAME the merchant. Rule (b) is the

@@ -2,7 +2,7 @@
 
 import json
 
-from ingestion import discover, merchant
+from ingestion import discover, merchant, render
 from ingestion.merchant import find_merchant_offers, result_to_dict
 from tests.test_extract import FakeLLM
 
@@ -30,6 +30,21 @@ def test_find_offers_happy_path(monkeypatch):
     assert r.offers[0].card_hint == "Emirates NBD"
     assert r.offers[0].valid_until == "31 Dec 2026"
     assert "emiratesnbd.com" in r.source_ref  # deal page ranked first
+
+
+def test_renders_js_page_when_plain_fetch_is_empty(monkeypatch):
+    # A bank lifestyle/deals SPA returns no server-side text; the render
+    # fallback supplies the rendered content so the offer is extracted.
+    monkeypatch.setattr(discover, "search", lambda q, country="": [
+        "https://lifestyle.emiratesnbd.com/en/deals/e-commerce/babies-basic"])
+    monkeypatch.setattr(discover, "fetch_text", lambda u, timeout=0: "")  # SPA
+    monkeypatch.setattr(
+        render, "render_text",
+        lambda u: "Babies Basic: extra 20% off with your Emirates NBD card")
+
+    r = find_merchant_offers("Babies Basic", FakeLLM(OFFERS_JSON))
+    assert r.offers and r.offers[0].card_hint == "Emirates NBD"
+    assert "emiratesnbd.com" in r.source_ref
 
 
 def test_category_from_keyword_even_if_search_fails(monkeypatch):

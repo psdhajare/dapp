@@ -36,12 +36,21 @@ DEEPSEEK_API_KEY=sk-...          # your key
 BRAVE_API_KEY=BSA...             # Brave Search API key (default web search)
 SEARXNG_URL=http://localhost:8888  # free fallback when Brave is unset/errors
 GEOIP_DB=/opt/geoip/GeoLite2-Country.mmdb  # local IP->country (optional)
+RENDER_API_KEY=fc-...            # JS-render fallback for SPA deal portals (optional)
+RENDER_PROVIDER=firecrawl        # default; provider behind ingestion/render.py
 INGEST_HOST=0.0.0.0
 INGEST_PORT=8765
 INGEST_DB=db/cards.db
 ```
 
 `chown dapp:dapp /opt/dapp/.env && chmod 600 /opt/dapp/.env`
+
+**JS render fallback:** many bank "lifestyle"/deals portals (e.g. Emirates NBD)
+are client-rendered SPAs — a plain fetch reads no text, so their offers can't be
+extracted. Set `RENDER_API_KEY` (a hosted render API, default Firecrawl —
+<https://firecrawl.dev>) and the pipeline fetches the browser-rendered text
+**only when the plain fetch is empty** (bounded + cached). Unset -> those pages
+are simply skipped (no error). One capability, works for any bank/country.
 
 **Search provider:** Brave is used by default when `BRAVE_API_KEY` is set
 (reliable from a server IP, and regionally biased by the caller's country); it
