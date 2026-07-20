@@ -13,6 +13,9 @@ INGEST_DB (default db/cards.db), INGEST_CACHE_TTL seconds (default 86400).
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import gc
 import json
 import os
 import threading
@@ -43,6 +46,23 @@ _rate = RateLimiter(RATE_LIMIT, window_seconds=60)
 # merchant key -> (expires_at_epoch, payload). Shared across handler threads.
 _search_cache: dict[str, tuple[float, dict]] = {}
 _cache_lock = threading.Lock()
+
+# A single request parses large HTML/PDF docs and builds big LLM prompts. Those
+# buffers are freed at end-of-request, but glibc keeps them in per-thread arenas
+# (ThreadingHTTPServer spawns a thread per request), so RSS ratchets up and never
+# comes back down -> eventual OOM. After each request we force a GC and ask glibc
+# to return the freed heap to the OS. Pair with MALLOC_ARENA_MAX=2 in the unit.
+try:
+    _libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+    _malloc_trim = _libc.malloc_trim
+except (OSError, AttributeError):  # non-glibc platforms (e.g. macOS dev)
+    _malloc_trim = None
+
+
+def _release_memory() -> None:
+    gc.collect()
+    if _malloc_trim is not None:
+        _malloc_trim(0)
 
 
 def _cache_get(key: str) -> dict | None:
@@ -136,6 +156,10 @@ class Handler(BaseHTTPRequestHandler):
             # friendly message. Keep a short code in the body for support.
             traceback.print_exc()
             self._send(500, {"error": "server_error", "detail": f"{type(e).__name__}: {e}"})
+        finally:
+            # Return the request's large transient buffers to the OS so RSS
+            # stays flat across requests instead of climbing to OOM.
+            _release_memory()
 
     def _optional_country(self, req: dict) -> str:
         """Sanitized country hint for search context; '' if absent/invalid."""
