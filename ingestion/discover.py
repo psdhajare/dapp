@@ -140,6 +140,33 @@ def search(query: str, country: str = "", limit: int = 10) -> list[str]:
     return []
 
 
+# Reliable-from-a-server engines merged for recall (no scrapers: they're
+# blocked from server IPs and their timeouts would stall the merge). Each
+# self-skips when unconfigured.
+_MERGE_ENGINES = (_brave, _searxng, _serper)
+
+
+def search_all(query: str, country: str = "", limit: int = 15) -> list[str]:
+    """UNION results across engines (recall over speed): Brave's localization +
+    SearXNG's index coverage, so one engine's gaps are filled by another. Falls
+    back to the first-wins scraper chain only if the merge engines yield nothing.
+    Used where missing a page loses a real offer (merchant discovery)."""
+    seen: list[str] = []
+    for engine in _MERGE_ENGINES:
+        try:
+            for u in engine(query, country) or []:
+                if u not in seen:
+                    seen.append(u)
+        except Exception:
+            continue
+    if seen:
+        return seen[:limit]
+    try:  # nothing from Brave/SearXNG/Serper -> last-resort scrapers
+        return search(query, country, limit)
+    except Exception:
+        return []
+
+
 def parse_search_results(html: str) -> list[str]:
     """Extract result URLs from DDG HTML (links are /l/?uddg=<encoded-url>)."""
     urls = []

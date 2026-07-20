@@ -99,9 +99,15 @@ def _merchant_tokens(merchant: str) -> list[str]:
 
 def _mentions_merchant(text: str, tokens: list[str]) -> bool:
     """True if the page text actually names the merchant — the relevance gate
-    that keeps generic bonus/aggregator pages out of the extraction."""
+    that keeps generic bonus/aggregator pages out of the extraction. Matches on
+    WHOLE words (so 'Basic' doesn't match 'basics' on an unrelated page) and
+    needs at least two of the merchant's words (one for a single-word name)."""
+    if not tokens:
+        return False
     tl = text.lower()
-    return any(tok in tl for tok in tokens)
+    hits = sum(1 for t in tokens
+               if re.search(rf"\b{re.escape(t)}\b", tl))
+    return hits >= min(2, len(tokens))
 
 
 def _rank_offer_urls(urls: list[str], merchant: str) -> list[str]:
@@ -153,7 +159,7 @@ def _gather_urls(merchant: str, country: str = "",
         queries.append(f'"{merchant}" {bank} offer{c}')
     for q in queries:
         try:
-            for u in discover.search(q, country=country):
+            for u in discover.search_all(q, country=country):
                 if u not in seen:
                     seen.append(u)
         except Exception:

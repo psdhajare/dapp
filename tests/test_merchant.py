@@ -18,7 +18,7 @@ OFFERS_JSON = json.dumps({
 
 def test_find_offers_happy_path(monkeypatch):
     # Offer/deal URL should outrank a generic article and be the source.
-    monkeypatch.setattr(discover, "search", lambda q, country="": [
+    monkeypatch.setattr(discover, "search_all", lambda q, country="": [
         "https://wallethub.com/best-baby-cards",
         "https://lifestyle.emiratesnbd.com/en/deals/glossy-salon-offer",
     ])
@@ -35,7 +35,7 @@ def test_find_offers_happy_path(monkeypatch):
 def test_renders_js_page_when_plain_fetch_is_empty(monkeypatch):
     # A bank lifestyle/deals SPA returns no server-side text; the render
     # fallback supplies the rendered content so the offer is extracted.
-    monkeypatch.setattr(discover, "search", lambda q, country="": [
+    monkeypatch.setattr(discover, "search_all", lambda q, country="": [
         "https://lifestyle.emiratesnbd.com/en/deals/e-commerce/babies-basic"])
     monkeypatch.setattr(discover, "fetch_text", lambda u, timeout=0: "")  # SPA
     monkeypatch.setattr(
@@ -50,7 +50,7 @@ def test_renders_js_page_when_plain_fetch_is_empty(monkeypatch):
 def test_category_from_keyword_even_if_search_fails(monkeypatch):
     def boom(_, country=""):
         raise LookupError("no results")
-    monkeypatch.setattr(discover, "search", boom)
+    monkeypatch.setattr(discover, "search_all", boom)
 
     # Salon keyword still yields a category; offers empty on search failure.
     r = find_merchant_offers("Downtown Salon", FakeLLM("{}"))
@@ -61,7 +61,7 @@ def test_category_from_keyword_even_if_search_fails(monkeypatch):
 def test_irrelevant_pages_are_dropped(monkeypatch):
     # A generic bonus/aggregator page that never names the merchant must not be
     # used as a source or fed to the LLM (the sushi-library / mypointslife bug).
-    monkeypatch.setattr(discover, "search", lambda q, country="": [
+    monkeypatch.setattr(discover, "search_all", lambda q, country="": [
         "https://www.mypointslife.com/bank-account-bonus-promotions-and-offers/",
     ])
     monkeypatch.setattr(
@@ -74,7 +74,7 @@ def test_irrelevant_pages_are_dropped(monkeypatch):
 
 
 def test_result_to_dict_shape(monkeypatch):
-    monkeypatch.setattr(discover, "search", lambda q, country="": ["https://x.ae/offer"])
+    monkeypatch.setattr(discover, "search_all", lambda q, country="": ["https://x.ae/offer"])
     monkeypatch.setattr(
         discover, "fetch_text", lambda u, timeout=0: "Some Cafe card offer")
     d = result_to_dict(find_merchant_offers("Some Cafe", FakeLLM(OFFERS_JSON)))
@@ -92,7 +92,7 @@ def test_bank_phrase_reduces_card_to_issuer():
 
 def test_gather_urls_adds_bank_targeted_queries(monkeypatch):
     queries: list[str] = []
-    monkeypatch.setattr(merchant.discover, "search",
+    monkeypatch.setattr(merchant.discover, "search_all",
                         lambda q, country="": (queries.append(q) or []))
     merchant._gather_urls("Khau Galli", country="AE",
                           cards=["Emirates NBD Platinum", "Wio Credit Card"])
