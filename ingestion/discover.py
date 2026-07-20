@@ -26,32 +26,19 @@ MAX_DOC_CHARS = 40_000
 _NOISE_WORDS = {"credit", "card", "cashback", "cash", "back", "rewards", "the", "bank"}
 
 
-def _searxng(query: str) -> list[str] | None:
-    """Self-hosted SearXNG metasearch (free, no key, aggregates engines).
-    Set SEARXNG_URL (e.g. http://localhost:8888) to enable. SearXNG must have
-    the JSON format enabled (search.formats: [html, json] in settings.yml)."""
-    base = os.environ.get("SEARXNG_URL")
-    if not base:
-        return None
-    resp = requests.get(
-        base.rstrip("/") + "/search",
-        params={"q": query, "format": "json"},
-        headers=HEADERS,
-        timeout=20,
-    )
-    resp.raise_for_status()
-    return [r["url"] for r in resp.json().get("results", []) if r.get("url")]
-
-
-def _brave(query: str) -> list[str] | None:
-    """Brave Search API — reliable from a server IP. Free tier ~2000/mo.
-    Set BRAVE_API_KEY to enable. Returns None (skip) when not configured."""
+def _brave(query: str, country: str = "") -> list[str] | None:
+    """Brave Search API — reliable from a server IP and locale-aware. Free tier
+    ~2000/mo. Set BRAVE_API_KEY to enable. Returns None (skip) when not
+    configured. `country` (ISO alpha-2, e.g. 'AE') regionally biases results."""
     key = os.environ.get("BRAVE_API_KEY")
     if not key:
         return None
+    params = {"q": query, "count": 10}
+    if country:
+        params["country"] = country.upper()  # e.g. AE -> UAE results
     resp = requests.get(
         "https://api.search.brave.com/res/v1/web/search",
-        params={"q": query, "count": 10},
+        params=params,
         headers={"X-Subscription-Token": key, "Accept": "application/json"},
         timeout=20,
     )
@@ -59,14 +46,37 @@ def _brave(query: str) -> list[str] | None:
     return [r["url"] for r in resp.json().get("web", {}).get("results", [])]
 
 
-def _serper(query: str) -> list[str] | None:
+def _searxng(query: str, country: str = "") -> list[str] | None:
+    """Self-hosted SearXNG metasearch (free, no key, aggregates engines).
+    Set SEARXNG_URL (e.g. http://localhost:8888) to enable. SearXNG must have
+    the JSON format enabled (search.formats: [html, json] in settings.yml)."""
+    base = os.environ.get("SEARXNG_URL")
+    if not base:
+        return None
+    params = {"q": query, "format": "json"}
+    if country:  # SearXNG language tag, e.g. en-AE; a soft regional hint.
+        params["language"] = f"en-{country.upper()}"
+    resp = requests.get(
+        base.rstrip("/") + "/search",
+        params=params,
+        headers=HEADERS,
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return [r["url"] for r in resp.json().get("results", []) if r.get("url")]
+
+
+def _serper(query: str, country: str = "") -> list[str] | None:
     """Serper.dev (Google results). Set SERPER_API_KEY to enable."""
     key = os.environ.get("SERPER_API_KEY")
     if not key:
         return None
+    body = {"q": query}
+    if country:
+        body["gl"] = country.lower()  # Google 'gl' geo-location param
     resp = requests.post(
         "https://google.serper.dev/search",
-        json={"q": query},
+        json=body,
         headers={"X-API-KEY": key, "Content-Type": "application/json"},
         timeout=20,
     )
@@ -74,14 +84,14 @@ def _serper(query: str) -> list[str] | None:
     return [r["link"] for r in resp.json().get("organic", []) if r.get("link")]
 
 
-def _ddg(query: str) -> list[str]:
+def _ddg(query: str, country: str = "") -> list[str]:
     resp = requests.get("https://html.duckduckgo.com/html/",
                         params={"q": query}, headers=HEADERS, timeout=20)
     resp.raise_for_status()
     return parse_search_results(resp.text)
 
 
-def _bing(query: str) -> list[str]:
+def _bing(query: str, country: str = "") -> list[str]:
     resp = requests.get("https://www.bing.com/search",
                         params={"q": query}, headers=HEADERS, timeout=20)
     resp.raise_for_status()
@@ -93,7 +103,7 @@ def _bing(query: str) -> list[str]:
     return urls
 
 
-def _mojeek(query: str) -> list[str]:
+def _mojeek(query: str, country: str = "") -> list[str]:
     resp = requests.get("https://www.mojeek.com/search",
                         params={"q": query}, headers=HEADERS, timeout=20)
     resp.raise_for_status()
@@ -107,18 +117,19 @@ def _mojeek(query: str) -> list[str]:
     return urls
 
 
-# Tried in order; first engine that returns results wins. Keyed APIs (reliable
-# from a server IP) go first when configured; keyless scrapers are the fallback.
-_ENGINES = (_searxng, _brave, _serper, _ddg, _bing, _mojeek)
+# Tried in order; first engine that returns results wins. Brave is the default
+# (locale-aware, reliable from a server IP); it self-skips when BRAVE_API_KEY is
+# absent, falling through to the free self-hosted SearXNG and keyless scrapers.
+_ENGINES = (_brave, _searxng, _serper, _ddg, _bing, _mojeek)
 
 
-def search(query: str, limit: int = 10) -> list[str]:
-    """Web search with provider fallback. Prefers a keyed API (BRAVE_API_KEY /
-    SERPER_API_KEY) when set; otherwise scrapes DDG/Bing/Mojeek."""
+def search(query: str, country: str = "", limit: int = 10) -> list[str]:
+    """Web search with provider fallback. Brave first when BRAVE_API_KEY is set
+    (regionally biased by `country`); otherwise SearXNG / keyless scrapers."""
     last_exc: Exception | None = None
     for engine in _ENGINES:
         try:
-            urls = engine(query)
+            urls = engine(query, country)
             if urls:
                 return urls[:limit]
         except Exception as e:  # engine blocked/errored -> try the next
@@ -172,7 +183,7 @@ def find_doc_urls(card_name: str, country: str = "", n: int = 6) -> list[str]:
     seen: list[str] = []
     for q in queries:
         try:
-            for u in search(q):
+            for u in search(q, country=country):
                 if u not in seen:
                     seen.append(u)
         except Exception:

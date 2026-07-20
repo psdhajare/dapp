@@ -1,2 +1,3 @@
 requests>=2.32
 pdfplumber>=0.11
+geoip2>=4.8          # local IP -> country (GeoLite2); lookups no-op if DB absent

@@ -130,7 +130,7 @@ def _gather_urls(merchant: str, country: str = "") -> list[str]:
     )
     for q in queries:
         try:
-            for u in discover.search(q):
+            for u in discover.search(q, country=country):
                 if u not in seen:
                     seen.append(u)
         except Exception:

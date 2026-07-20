@@ -33,12 +33,43 @@ Create `/opt/dapp/.env`:
 
 ```
 DEEPSEEK_API_KEY=sk-...          # your key
+BRAVE_API_KEY=BSA...             # Brave Search API key (default web search)
+SEARXNG_URL=http://localhost:8888  # free fallback when Brave is unset/errors
+GEOIP_DB=/opt/geoip/GeoLite2-Country.mmdb  # local IP->country (optional)
 INGEST_HOST=0.0.0.0
 INGEST_PORT=8765
 INGEST_DB=db/cards.db
 ```
 
 `chown dapp:dapp /opt/dapp/.env && chmod 600 /opt/dapp/.env`
+
+**Search provider:** Brave is used by default when `BRAVE_API_KEY` is set
+(reliable from a server IP, and regionally biased by the caller's country); it
+falls back to SearXNG then keyless scrapers when unset or on error. Get a free
+key (~2000 queries/mo) at <https://brave.com/search/api/> and paste it into
+`.env` as `BRAVE_API_KEY`, then `systemctl restart bestcard-ingest`.
+
+## 3b. GeoLite2 country DB (optional but recommended)
+
+Lets the server infer the user's country from the request IP (no client
+involvement) to localize merchant-offer search. Lookups no-op gracefully if the
+DB is absent, so this is optional.
+
+```bash
+# One-time: create a free MaxMind account -> generate a License Key.
+#   https://www.maxmind.com/en/geolite2/signup
+mkdir -p /opt/geoip
+# Option A: geoipupdate (auto-refreshes monthly) — put AccountID + LicenseKey
+#   in /etc/GeoIP.conf with EditionIDs=GeoLite2-Country, then:
+apt-get install -y geoipupdate && geoipupdate            # -> /usr/share/GeoIP/GeoLite2-Country.mmdb
+ln -sf /usr/share/GeoIP/GeoLite2-Country.mmdb /opt/geoip/GeoLite2-Country.mmdb
+# Option B: download the tarball with your license key and extract the .mmdb
+#   to /opt/geoip/GeoLite2-Country.mmdb
+chown -R dapp:dapp /opt/geoip
+```
+
+The DB is **not** in the repo (MaxMind licence). Attribution required by their
+terms. `pip3 install -r ingestion/requirements.txt` pulls the `geoip2` lib.
 
 ## 4. Run as a service
 

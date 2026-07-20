@@ -28,6 +28,7 @@ from .cardkey import card_key
 from .cli import run_auto
 from .db import Database
 from .extract import Extraction
+from .geoip import country_for_ip
 from .llm import get_client
 from .merchant import find_merchant_offers, result_to_dict
 from .programs import programs_for_cards
@@ -126,11 +127,20 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self._body or b"{}")
 
     def _client_ip(self) -> str:
-        # Behind NPM: trust X-Forwarded-For's first hop if present.
+        # Behind Cloudflare -> NPM: CF-Connecting-IP is the authoritative client
+        # IP; fall back to X-Forwarded-For's first hop, then the socket peer.
+        cf = self.headers.get("CF-Connecting-IP")
+        if cf:
+            return cf.strip()
         fwd = self.headers.get("X-Forwarded-For")
         if fwd:
             return fwd.split(",")[0].strip()
         return self.client_address[0]
+
+    def _geo_country(self) -> str:
+        """Country inferred locally from the request IP (GeoLite2). Zero client
+        involvement; '' when unknown so search stays location-agnostic."""
+        return country_for_ip(self._client_ip())
 
     def do_POST(self):
         try:
@@ -161,23 +171,16 @@ class Handler(BaseHTTPRequestHandler):
             # stays flat across requests instead of climbing to OOM.
             _release_memory()
 
-    def _optional_country(self, req: dict) -> str:
-        """Sanitized country hint for search context; '' if absent/invalid."""
-        raw = req.get("country")
-        if not raw:
-            return ""
-        try:
-            return sanitize_query(raw)
-        except InputError:
-            return ""
-
     def _handle_ingest(self):
         req = self._read_json()
         # sanitize_query raises InputError (-> 400) on empty/oversized/malicious.
         # NOTE: client-supplied 'url' is intentionally ignored here (SSRF guard);
         # the server always discovers the doc URL itself.
         card_name = sanitize_query(req.get("card"))
-        country = self._optional_country(req)
+        # No location hint when adding a card: the card belongs to its bank's
+        # country (India/US/UAE...), which the bank name already localizes — the
+        # user's current location would only mislead the doc search.
+        country = ""
         refresh = bool(req.get("refresh"))
         # Identity by card name only (country is a search hint, not identity):
         # "ENBD Duo" and "Emirates NBD Duo Credit Card" share one entry.
@@ -220,7 +223,7 @@ class Handler(BaseHTTPRequestHandler):
                     cards.append(sanitize_query(c))
                 except InputError:
                     continue
-        country = self._optional_country(req)
+        country = self._geo_country()  # inferred from IP, not the client
         # Cache depends on the market + which programs the cards grant.
         progs = programs_for_cards(cards)
         key = merchant.lower() + "|" + country.lower() + "|" + ",".join(sorted(progs))

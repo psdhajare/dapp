@@ -291,30 +291,26 @@ class Handler(BaseHTTPRequestHandler):
 
 Optional defensive cap on the in‑memory search cache (evict oldest when large), so it can never grow unbounded even though today its entries are small.
 
-### 8.3 Process — cap arenas and hard‑limit the service (systemd drop‑in)
+### 8.3 Process — cap arenas and hard‑limit the service (systemd)
 
-Add a drop‑in that (a) caps glibc arenas — the main fix for the thread‑per‑request bloat, (b) trims aggressively, (c) sets a soft/hard memory ceiling on **the service only**, and (d) auto‑restarts.
+The shipped unit `ingestion/deploy/bestcard-ingest.service` now (a) caps glibc
+arenas — the main fix for the thread‑per‑request bloat, (b) trims aggressively,
+(c) sets a soft/hard memory ceiling on **the service only**, and (d) auto‑restarts.
 
 ```ini
-# /etc/systemd/system/bestcard-ingest.service.d/override.conf
-[Service]
-# Cap per-thread memory arenas (root cause of the RSS multiplication).
+# ingestion/deploy/bestcard-ingest.service  [Service] section
 Environment=MALLOC_ARENA_MAX=2
 Environment=MALLOC_TRIM_THRESHOLD_=131072
-
-# Throttle at 600M, hard-cap at 768M. If exceeded, only THIS service is
-# restarted by systemd — the container stays healthy.
 MemoryHigh=600M
 MemoryMax=768M
-
-# Always recover on exit/kill.
 Restart=always
-RestartSec=2
+RestartSec=3
 ```
 
-Apply:
+Apply on the server:
 
 ```bash
+cp /opt/dapp/ingestion/deploy/bestcard-ingest.service /etc/systemd/system/
 pct exec 104 -- systemctl daemon-reload
 pct exec 104 -- systemctl restart bestcard-ingest
 pct exec 104 -- systemctl show bestcard-ingest -p MemoryMax,MemoryHigh,Restart

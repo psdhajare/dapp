@@ -7,13 +7,24 @@ Wants=network-online.target
 Type=simple
 # Adjust to where you cloned the repo inside the container.
 WorkingDirectory=/opt/dapp
-# DEEPSEEK_API_KEY (and optional INGEST_HOST/INGEST_PORT/INGEST_DB) live here.
+# DEEPSEEK_API_KEY, BRAVE_API_KEY, GEOIP_DB, SEARXNG_URL, INGEST_* live here.
 EnvironmentFile=/opt/dapp/.env
 ExecStart=/usr/bin/python3 -m ingestion.server
 Restart=always
 RestartSec=3
 User=dapp
 Group=dapp
+
+# --- Memory hardening (see docs/incidents/2026-07-20-ingestion-oom.md) ---
+# ThreadingHTTPServer spawns a thread per request; glibc gives each thread its
+# own malloc arena that hoards freed large buffers (PDF/HTML/LLM text). Cap the
+# arenas + trim aggressively so RSS stays flat instead of climbing to OOM.
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_TRIM_THRESHOLD_=131072
+# Ceiling on THIS service only: if it exceeds MemoryMax, systemd restarts just
+# the service (Restart=always above) — the container never OOMs.
+MemoryHigh=600M
+MemoryMax=768M
 
 [Install]
 WantedBy=multi-user.target

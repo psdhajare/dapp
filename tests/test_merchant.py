@@ -18,7 +18,7 @@ OFFERS_JSON = json.dumps({
 
 def test_find_offers_happy_path(monkeypatch):
     # Offer/deal URL should outrank a generic article and be the source.
-    monkeypatch.setattr(discover, "search", lambda q: [
+    monkeypatch.setattr(discover, "search", lambda q, country="": [
         "https://wallethub.com/best-baby-cards",
         "https://lifestyle.emiratesnbd.com/en/deals/glossy-salon-offer",
     ])
@@ -33,7 +33,7 @@ def test_find_offers_happy_path(monkeypatch):
 
 
 def test_category_from_keyword_even_if_search_fails(monkeypatch):
-    def boom(_):
+    def boom(_, country=""):
         raise LookupError("no results")
     monkeypatch.setattr(discover, "search", boom)
 
@@ -46,7 +46,7 @@ def test_category_from_keyword_even_if_search_fails(monkeypatch):
 def test_irrelevant_pages_are_dropped(monkeypatch):
     # A generic bonus/aggregator page that never names the merchant must not be
     # used as a source or fed to the LLM (the sushi-library / mypointslife bug).
-    monkeypatch.setattr(discover, "search", lambda q: [
+    monkeypatch.setattr(discover, "search", lambda q, country="": [
         "https://www.mypointslife.com/bank-account-bonus-promotions-and-offers/",
     ])
     monkeypatch.setattr(
@@ -59,7 +59,7 @@ def test_irrelevant_pages_are_dropped(monkeypatch):
 
 
 def test_result_to_dict_shape(monkeypatch):
-    monkeypatch.setattr(discover, "search", lambda q: ["https://x.ae/offer"])
+    monkeypatch.setattr(discover, "search", lambda q, country="": ["https://x.ae/offer"])
     monkeypatch.setattr(
         discover, "fetch_text", lambda u, timeout=0: "Some Cafe card offer")
     d = result_to_dict(find_merchant_offers("Some Cafe", FakeLLM(OFFERS_JSON)))

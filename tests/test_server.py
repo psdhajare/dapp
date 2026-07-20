@@ -17,6 +17,7 @@ from ingestion.models import Card, Offer, RewardRule
 def running_server(monkeypatch, tmp_path):
     def fake_run_auto(card_name, db_path, provider=None, url=None, client=None,
                       country=""):
+        srv._ingest_country = country  # expose for assertions
         if card_name == "Broken Card":
             raise RuntimeError("pipeline blew up")  # -> 500
         if card_name == "Nonexistent Card":
@@ -36,6 +37,7 @@ def running_server(monkeypatch, tmp_path):
 
     def fake_find(merchant, client, url=None, cards=None, country=""):
         calls["n"] += 1
+        calls["country"] = country  # expose the country the server passed
         return MerchantResult(
             merchant=merchant, category="beauty",
             offers=[MerchantOffer(title="20% off", card_hint="Emirates NBD")],
@@ -106,6 +108,24 @@ def test_search_returns_category_and_offers(running_server):
 def test_search_missing_merchant_400(running_server):
     status, _ = _post(f"{running_server}/search", {})
     assert status == 400
+
+
+def test_search_infers_country_from_ip(running_server, monkeypatch):
+    # Country comes from the request IP (GeoLite2), not the client body.
+    monkeypatch.setattr(srv, "country_for_ip", lambda ip: "AE")
+    status, _ = _post(f"{running_server}/search",
+                      {"merchant": "Salt", "country": "ZZ"})  # body country ignored
+    assert status == 200
+    assert srv._merchant_calls["country"] == "AE"
+
+
+def test_ingest_uses_no_location_country(running_server, monkeypatch):
+    # A card belongs to its bank's country, not the user's location, so ingest
+    # must NOT apply the IP country even when one is known.
+    monkeypatch.setattr(srv, "country_for_ip", lambda ip: "AE")
+    status, _ = _post(f"{running_server}/ingest", {"card": "My Card"})
+    assert status == 200
+    assert srv._ingest_country == ""
 
 
 def test_search_second_call_is_cached_no_pipeline(running_server):
